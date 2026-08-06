@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/vite-env.d.ts","./src/components/layout/sidebar.tsx","./src/components/viewer/threecanvas.tsx","./src/components/viewer/viewcontrols.tsx","./src/types/project.ts"],"version":"6.0.3"}

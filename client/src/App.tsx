@@ -2,7 +2,7 @@ import { useState, useRef } from 'react';
 import { Sidebar } from './components/layout/Sidebar';
 import { ThreeCanvas } from './components/viewer/ThreeCanvas';
 import { ViewControls } from './components/viewer/ViewControls';
-import { Sun, Moon, Circle, Lightbulb, LightbulbOff, Upload } from 'lucide-react';
+import { Sun, Moon, Circle, Lightbulb } from 'lucide-react';
 
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 // Import types using 'type' keyword for clarity and correct bundling
@@ -51,21 +51,40 @@ function App() {
       const newLayers = [...currentLayers];
       const layerIndex = newLayers.findIndex(l => l.id === layerId);
 
-      // Guard against invalid inputs
       if (layerIndex === -1 || isNaN(newHeight) || newHeight < 0) {
         return currentLayers;
       }
 
-      // 1. Update the height of the target layer
       newLayers[layerIndex] = { ...newLayers[layerIndex], layerHeightMm: newHeight };
 
-      // 2. Recalculate Z-offsets for all subsequent layers to ensure they stack correctly
-      for (let i = layerIndex + 1; i < newLayers.length; i++) {
-        const prevLayer = newLayers[i - 1];
-        newLayers[i] = { ...newLayers[i], zOffsetMm: prevLayer.zOffsetMm + prevLayer.layerHeightMm };
+      let cumulativeHeight = 0;
+      for (let i = 0; i < newLayers.length; i++) {
+        newLayers[i] = { ...newLayers[i], zOffsetMm: cumulativeHeight };
+        cumulativeHeight += newLayers[i].layerHeightMm;
       }
 
       return newLayers;
+    });
+  };
+
+  const moveLayer = (layerId: string, direction: -1 | 1) => {
+    setLayers(currentLayers => {
+      const index = currentLayers.findIndex(layer => layer.id === layerId);
+      if (index === -1) return currentLayers;
+
+      const targetIndex = index + direction;
+      if (targetIndex < 0 || targetIndex >= currentLayers.length) return currentLayers;
+
+      const reordered = [...currentLayers];
+      const [movedLayer] = reordered.splice(index, 1);
+      reordered.splice(targetIndex, 0, movedLayer);
+
+      let cumulativeHeight = 0;
+      return reordered.map(layer => {
+        const updatedLayer = { ...layer, zOffsetMm: cumulativeHeight };
+        cumulativeHeight += layer.layerHeightMm;
+        return updatedLayer;
+      });
     });
   };
 
@@ -125,15 +144,17 @@ function App() {
       // Generate new layers from the extracted colors
       let cumulativeHeight = 0;
       const newLayers = result.layers.map((layerData, index) => {
-        const defaultHeight = 0.8; // A default height for new layers
+        const isBaseLayer = index === 0;
+        const defaultHeight = isBaseLayer ? 1.2 : 0.35;
+        const name = isBaseLayer ? 'Base Layer' : `Detail Layer ${index}`;
         const newLayer: LayerConfig = {
           id: `layer-${Date.now()}-${index}`,
-          name: `Layer ${index + 1}`,
+          name,
           originalColor: layerData.color,
           filamentColorHex: layerData.color,
           layerHeightMm: defaultHeight,
           zOffsetMm: cumulativeHeight,
-          opacity: 1,
+          opacity: isBaseLayer ? 1 : 0.95,
           isVisible: true,
           pathData: layerData.svg_path,
         };
@@ -176,6 +197,7 @@ function App() {
           onLayerHeightChange={handleLayerHeightChange}
           onLayerColorChange={handleLayerColorChange}
           onLayerOpacityChange={handleLayerOpacityChange}
+          onMoveLayer={moveLayer}
           // Pass exploded view state and handler
           isExplodedView={isExplodedView}
           onToggleExplodedView={handleToggleExplodedView}

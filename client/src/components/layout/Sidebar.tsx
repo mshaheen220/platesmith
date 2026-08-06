@@ -10,6 +10,7 @@ interface SidebarProps {
   onLayerHeightChange: (layerId: string, newHeight: number) => void;
   onLayerColorChange: (layerId: string, newColor: string) => void;
   onLayerOpacityChange: (layerId: string, newOpacity: number) => void;
+  onMoveLayer: (layerId: string, direction: -1 | 1) => void;
   isExplodedView: boolean; // New prop for exploded view state
   onToggleExplodedView: () => void; // New prop for toggling exploded view
   isBacklightOn: boolean;
@@ -18,7 +19,7 @@ interface SidebarProps {
   currentCanvasBgClass: 'bg-gray-700' | 'bg-gray-200' | 'bg-gray-500'; // Update type
 }
 
-export function Sidebar({ layers, onImageUpload, isProcessing, onToggleVisibility, onLayerHeightChange, onLayerColorChange, onLayerOpacityChange, isExplodedView, onToggleExplodedView, isBacklightOn, onToggleBacklight, onToggleCanvasBackground, currentCanvasBgClass }: SidebarProps) {
+export function Sidebar({ layers, onImageUpload, isProcessing, onToggleVisibility, onLayerHeightChange, onLayerColorChange, onLayerOpacityChange, onMoveLayer, isExplodedView, onToggleExplodedView, isBacklightOn, onToggleBacklight, onToggleCanvasBackground, currentCanvasBgClass }: SidebarProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
 
@@ -162,6 +163,19 @@ export function Sidebar({ layers, onImageUpload, isProcessing, onToggleVisibilit
                         className="w-32 accent-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                       />
                       <span className="text-xs text-gray-400 w-8 text-right">{layer.opacity.toFixed(2)}</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs text-gray-400">Order</span>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => onMoveLayer(layer.id, -1)}
+                        className="px-2 py-1 text-xs rounded bg-gray-800 text-gray-200 hover:bg-gray-600"
+                      >↑</button>
+                      <button
+                        onClick={() => onMoveLayer(layer.id, 1)}
+                        className="px-2 py-1 text-xs rounded bg-gray-800 text-gray-200 hover:bg-gray-600"
+                      >↓</button>
                     </div>
                   </div>
                 </li>
