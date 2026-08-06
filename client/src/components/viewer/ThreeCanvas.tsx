@@ -31,7 +31,7 @@ function LayerGeometry({ layer, isBacklightOn }: { layer: LayerConfig; isBacklig
   return (
     <Extrude
       // The depth is scaled relative to the normalized model, making it visible.
-      args={[shapes, { steps: 1, depth: layer.layerHeightMm * 10, bevelEnabled: false }]}
+      args={[shapes, { steps: 1, depth: layer.layerHeightMm, bevelEnabled: false }]}
     >
       <meshStandardMaterial
         color={layer.filamentColorHex}
@@ -65,11 +65,11 @@ export function ThreeCanvas({ layers, canvasBgClass, isExplodedView, isBacklight
 
         {/* We wrap the Center component in a group to apply global transformations.
             We flip the Y-axis to correct the SVG orientation and apply a uniform scale. */}
-        <group scale={[0.005, -0.005, 0.005]}>
+        <group scale={[0.005, -0.005, MM_TO_SCENE_UNITS]}>
           <Center>
             {layers.map((layer, index) =>
               layer.isVisible && (
-                <group key={layer.id} position={[0, 0, (layer.zOffsetMm * MM_TO_SCENE_UNITS) + (isExplodedView ? index * SPREAD_FACTOR : 0)]}>
+                <group key={layer.id} position={[0, 0, layer.zOffsetMm + (isExplodedView ? index * SPREAD_FACTOR / MM_TO_SCENE_UNITS : 0)]}>
                   <LayerGeometry layer={layer} isBacklightOn={isBacklightOn} />
                 </group>
               )

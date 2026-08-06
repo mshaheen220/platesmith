@@ -9,8 +9,8 @@ import numpy as np # Already imported, but good to ensure
 import cv2 # Import OpenCV
 
 app = FastAPI(
-    title="stack3d Backend",
-    description="Handles image processing and 3D mesh generation for the stack3d application.",
+    title="platesmith Backend",
+    description="Handles image processing and 3D mesh generation for the platesmith application.",
 )
 
 # Configure CORS to allow requests from our frontend
@@ -127,7 +127,7 @@ def create_layer_from_color(
 @app.get("/")
 def read_root() -> Dict[str, str]:
     """A simple endpoint to confirm the server is running."""
-    return {"message": "stack3d backend is running!"}
+    return {"message": "platesmith backend is running!"}
 
 @app.post("/process-image/")
 async def process_image(file: UploadFile = File(...), num_colors: int = 10) -> ProcessImageResponse:

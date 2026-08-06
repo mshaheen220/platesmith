@@ -151,9 +151,9 @@ function App() {
   return (
     <div className="bg-gray-900 text-white h-screen flex flex-col font-sans">
       <header className="bg-gray-800 border-b border-gray-700 px-6 py-3 flex items-center gap-3">
-        <img src="/favicon/favicon.svg" alt="stack3d logo" className="h-6 w-6" />
+        <img src="/favicon/favicon.svg" alt="platesmith logo" className="h-6 w-6" />
         <h1 className="text-xl font-bold tracking-tight">
-          stack3d
+          platesmith
           {/* Optional: Add a small indicator for the current background mode */}
           {isBacklightOn ?
             <Lightbulb className="ml-2 inline-block h-4 w-4 text-yellow-400" /> :

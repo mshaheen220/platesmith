@@ -1,5 +1,5 @@
 /**
- * Defines the types of projects supported by stack3d.
+ * Defines the types of projects supported by platesmith.
  * This allows for architectural extensibility using a Strategy/Factory pattern.
  */
 export type ProjectType = 'LIGHTBOX' | 'XMAS_ORNAMENT'; // Add more as needed
