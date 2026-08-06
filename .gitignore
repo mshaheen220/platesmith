@@ -1,0 +1,49 @@
+# Git ignore for stack3d project
+
+# Node.js / Frontend (Vite)
+node_modules/
+dist/
+build/
+.env
+.env.local
+.env.*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-store/
+report.html
+.vite/
+
+# Python / Backend (FastAPI)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.env
+pip-log.txt
+pip-delete-this-directory.txt
+.python-version
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# OS and Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Temporary/Output files
+temp_exports/
+output/
+*.stl
+*.3mf
+*.zip
+*.log
+coverage/
+tmp/
