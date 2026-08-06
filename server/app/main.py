@@ -1,10 +1,11 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List
+from collections import Counter
+from math import sqrt
 from pydantic import BaseModel
 import io
 from PIL import Image
-import trimesh
 import numpy as np
 import cv2
 
@@ -61,62 +62,126 @@ def merge_similar_colors(hex_colors: List[str], threshold: float) -> List[str]:
             distinct_colors.append(color)
     return distinct_colors
 
+def contour_to_path_data(contour: np.ndarray) -> str:
+    points = contour.reshape(-1, 2).astype(np.float64)
+    if len(points) < 3:
+        return ''
+    path_parts = [f"M{points[0][0]:.6f},{points[0][1]:.6f}"]
+    for point in points[1:]:
+        path_parts.append(f"L{point[0]:.6f},{point[1]:.6f}")
+    path_parts.append('Z')
+    return ' '.join(path_parts)
+
+
 def create_svg_path_from_mask(mask_array: np.ndarray, use_external_only: bool = False) -> str:
-    """Convert a binary mask into a compact SVG path string."""
+    """Convert a binary mask into an SVG string with explicit closed paths."""
     retrieval_mode = cv2.RETR_EXTERNAL if use_external_only else cv2.RETR_CCOMP
     contours_list, hierarchy = cv2.findContours(mask_array, retrieval_mode, cv2.CHAIN_APPROX_SIMPLE)
     if not contours_list:
         return ''
 
+    width = max(mask_array.shape[1], 1)
+    height = max(mask_array.shape[0], 1)
+
     if use_external_only:
         contour = max(contours_list, key=cv2.contourArea)
-        points = contour.reshape(-1, 2).astype(np.float64)
-        if len(points) < 3:
+        path_data = contour_to_path_data(contour)
+        if not path_data:
             return ''
-        combined_path = trimesh.path.Path2D(
-            entities=[trimesh.path.entities.Line(np.arange(len(points)))],
-            vertices=points,
+        return (
+            f'<svg width="100%" height="100%" viewBox="0 0 {width} {height}" '
+            f'xmlns="http://www.w3.org/2000/svg"><path d="{path_data}" fill="#000000" fill-rule="evenodd" /></svg>'
         )
-        return combined_path.export(file_type='svg')
 
-    polygons: List[np.ndarray] = []
-    holes: List[np.ndarray] = []
+    path_elements: List[str] = []
     for index, contour in enumerate(contours_list):
-        points = contour.reshape(-1, 2).astype(np.float64)
-        if hierarchy[0][index][3] != -1:
-            holes.append(points)
-        else:
-            polygons.append(points)
+        path_data = contour_to_path_data(contour)
+        if not path_data:
+            continue
+        path_elements.append(f'<path d="{path_data}" fill="#000000" fill-rule="evenodd" />')
 
-    if not polygons:
+    if not path_elements:
         return ''
 
-    combined_path = trimesh.path.Path2D(
-        entities=[trimesh.path.entities.Line(np.arange(len(p))) for p in polygons] +
-                 [trimesh.path.entities.Line(np.arange(len(h))) for h in holes],
-        vertices=np.vstack(polygons + holes) if polygons or holes else []
+    body = ''.join(path_elements)
+    return (
+        f'<svg width="100%" height="100%" viewBox="0 0 {width} {height}" '
+        f'xmlns="http://www.w3.org/2000/svg">{body}</svg>'
     )
-    return combined_path.export(file_type='svg')
+
+
+def estimate_background_color(image: Image.Image) -> np.ndarray:
+    """Estimate the background color from the image corners."""
+    rgba = np.array(image.convert('RGBA'))
+    height, width = rgba.shape[:2]
+    samples = []
+    for y, x in [(0, 0), (0, width - 1), (height - 1, 0), (height - 1, width - 1)]:
+        if rgba[y, x, 3] > 200:
+            samples.append(rgba[y, x, :3].astype(np.float32))
+    if not samples:
+        return np.array([255, 255, 255], dtype=np.float32)
+    return np.median(np.stack(samples, axis=0), axis=0).astype(np.float32)
+
+
+def create_foreground_mask(image: Image.Image) -> np.ndarray:
+    """Create a foreground mask using transparency, contrast, and background difference."""
+    rgba = np.array(image.convert('RGBA'))
+    alpha = rgba[:, :, 3].astype(np.uint8)
+    rgb = rgba[:, :, :3].astype(np.float32)
+
+    background_color = estimate_background_color(image)
+    color_distance = np.linalg.norm(rgb - background_color, axis=2)
+    gray = cv2.cvtColor(rgba[:, :, :3].astype(np.uint8), cv2.COLOR_RGBA2GRAY)
+
+    transparent_mask = np.where(alpha < 250, 255, 0).astype(np.uint8)
+    contrast_mask = np.where((color_distance > 35.0) | (gray < 220), 255, 0).astype(np.uint8)
+    foreground_mask = cv2.bitwise_or(transparent_mask, contrast_mask)
+
+    foreground_mask = cv2.medianBlur(foreground_mask, 5)
+    foreground_mask = cv2.morphologyEx(foreground_mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    foreground_mask = cv2.morphologyEx(foreground_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    return foreground_mask
+
+
+def estimate_component_color(image: Image.Image, component_mask: np.ndarray) -> str:
+    """Estimate a dominant hue for a component using the foreground pixels."""
+    rgba = np.array(image.convert('RGBA'))
+    mask = component_mask.astype(bool)
+    if not np.any(mask):
+        return '#000000'
+
+    pixels = rgba[mask]
+    if len(pixels) == 0:
+        return '#000000'
+
+    visible_pixels = pixels[pixels[:, 3] > 128] if pixels.shape[1] >= 4 else pixels
+    if len(visible_pixels) == 0:
+        return '#000000'
+
+    rgb_pixels = visible_pixels[:, :3].astype(np.uint8)
+    if len(rgb_pixels) == 0:
+        return '#000000'
+
+    quantized = (rgb_pixels // 32) * 32
+    color_keys = [tuple(color) for color in quantized]
+    counts = Counter(color_keys)
+    if not counts:
+        return '#000000'
+
+    dominant_color = counts.most_common(1)[0][0]
+    r, g, b = dominant_color
+    return f'#{r:02x}{g:02x}{b:02x}'
 
 
 def create_base_layer_from_image(image: Image.Image) -> LayerData | None:
     """Create a base silhouette layer for the overall object shape."""
     try:
-        rgb = np.array(image.convert('RGB'))
-        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        foreground_mask = create_foreground_mask(image)
 
-        # Remove the bright background by selecting darker pixels as foreground.
-        # For ink-like artwork, the outline and detail lines should dominate the base layer.
-        foreground_mask = np.where(gray < 230, 255, 0).astype(np.uint8)
-        foreground_mask = cv2.medianBlur(foreground_mask, 5)
-        foreground_mask = cv2.morphologyEx(foreground_mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-
-        # Keep only the largest connected component so the background does not become the base.
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(foreground_mask, connectivity=8)
         if num_labels <= 1:
             return None
 
-        # Pick the component with the largest area that is not the background.
         component_sizes = stats[1:, cv2.CC_STAT_AREA]
         if len(component_sizes) == 0:
             return None
@@ -124,69 +189,56 @@ def create_base_layer_from_image(image: Image.Image) -> LayerData | None:
         largest_component_index = 1 + int(np.argmax(component_sizes))
         component_mask = np.where(labels == largest_component_index, 255, 0).astype(np.uint8)
 
-        contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(component_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return None
 
-        largest_contour = max(contours, key=cv2.contourArea)
-        contour_points = largest_contour.reshape(-1, 2).astype(np.float64)
-        combined_path = trimesh.path.Path2D(
-            entities=[trimesh.path.entities.Line(np.arange(len(contour_points)))],
-            vertices=contour_points,
-        )
-        svg_path = combined_path.export(file_type='svg')
+        svg_path = create_svg_path_from_mask(component_mask, use_external_only=False)
         if not svg_path:
             return None
-        return LayerData(color='#000000', svg_path=svg_path)
+        color = estimate_component_color(image, component_mask)
+        return LayerData(color=color, svg_path=svg_path)
     except Exception as exc:
         print(f'Could not create base layer: {exc}')
         return None
 
 
-def create_layer_from_color(
-    color_hex: str,
-    quantized_image: Image.Image,
-    palette: List[int],
-    color_distance_threshold: float
-) -> LayerData | None:
-    """Generate an optional detail layer from a detected color region."""
+def create_print_layers_from_image(image: Image.Image) -> List[LayerData]:
+    """Create a print-oriented layer stack from connected foreground regions."""
     try:
-        target_rgb = hex_to_rgb(color_hex)
-        palette_rgb = [tuple(palette[i:i + 3]) for i in range(0, len(palette), 3)]
-        matching_indices = {
-            i for i, rgb in enumerate(palette_rgb)
-            if color_distance(rgb, target_rgb) < color_distance_threshold
-        }
+        foreground_mask = create_foreground_mask(image)
 
-        if not matching_indices:
-            return None
-
-        quantized_array = np.array(quantized_image)
-        mask_array = np.isin(quantized_array, list(matching_indices)).astype(np.uint8) * 255
-        mask_array = cv2.medianBlur(mask_array, 5)
-        mask_array = cv2.morphologyEx(mask_array, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_array, connectivity=8)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(foreground_mask, connectivity=8)
         if num_labels <= 1:
-            return None
+            return []
 
-        component_sizes = stats[1:, cv2.CC_STAT_AREA]
-        if len(component_sizes) == 0:
-            return None
+        components = []
+        for label_index in range(1, num_labels):
+            area = stats[label_index, cv2.CC_STAT_AREA]
+            if area < 50:
+                continue
 
-        # Keep the largest connected component for a single, coherent detail layer.
-        largest_component_index = 1 + int(np.argmax(component_sizes))
-        component_mask = np.where(labels == largest_component_index, 255, 0).astype(np.uint8)
-        if cv2.countNonZero(component_mask) < 20:
-            return None
+            component_mask = np.where(labels == label_index, 255, 0).astype(np.uint8)
+            candidate_masks = [component_mask]
+            if area > 100:
+                eroded_mask = cv2.erode(component_mask, np.ones((3, 3), np.uint8), iterations=1)
+                if cv2.countNonZero(eroded_mask) > 20:
+                    candidate_masks.append(eroded_mask)
 
-        svg_path = create_svg_path_from_mask(component_mask, use_external_only=True)
-        if not svg_path:
-            return None
-        return LayerData(color=color_hex, svg_path=svg_path)
+            for mask in candidate_masks:
+                svg_path = create_svg_path_from_mask(mask, use_external_only=False)
+                if not svg_path:
+                    continue
+                if any(existing.svg_path == svg_path for _, existing in components):
+                    continue
+                color = estimate_component_color(image, mask)
+                components.append((area, LayerData(color=color, svg_path=svg_path)))
+
+        components.sort(key=lambda item: item[0], reverse=True)
+        return [layer for _, layer in components[:4]]
     except Exception as exc:
-        print(f'Could not generate path for color {color_hex}: {exc}')
-        return None
+        print(f'Could not create print layers: {exc}')
+        return []
 
 @app.get("/")
 def read_root() -> Dict[str, str]:
@@ -200,39 +252,21 @@ async def process_image(file: UploadFile = File(...), num_colors: int = 10) -> P
     """
     # Read the image file into memory
     contents = await file.read()
-    image = Image.open(io.BytesIO(contents)).convert("RGB")
+    image = Image.open(io.BytesIO(contents)).convert("RGBA")
 
     # Resize the image to a manageable size for faster processing.
     # This is a crucial step for performance with large images.
     max_size = (512, 512)
     image.thumbnail(max_size)
 
-    # Quantize the image to reduce the number of colors to a maximum of 8.
-    # This is a simple way to find dominant colors.
-    quantized_image = image.quantize(colors=num_colors, method=Image.Quantize.MEDIANCUT)
-    
-    # Get the palette, which is a flat list [r1, g1, b1, r2, g2, b2, ...].
-    # We convert it to a list of [r, g, b] tuples and then to HEX strings.
-    palette = quantized_image.getpalette()
-    if palette is None:
-        return ProcessImageResponse(filename=file.filename, layers=[])
-        
-    rgb_colors = [tuple(palette[i:i + 3]) for i in range(0, len(palette), 3)]
-    initial_hex_colors = [f"#{r:02x}{g:02x}{b:02x}" for r, g, b in rgb_colors[:num_colors]]
-
-    # This threshold can be tuned. Higher values mean more colors will be merged.
-    color_distance_threshold = 40.0
-    distinct_colors = merge_similar_colors(initial_hex_colors, color_distance_threshold)
-
     base_layer = create_base_layer_from_image(image)
     response_layers: List[LayerData] = []
     if base_layer is not None:
         response_layers.append(base_layer)
 
-    accent_layers = [
-        layer for color_hex in distinct_colors[:4]
-        if (layer := create_layer_from_color(color_hex, quantized_image, palette, color_distance_threshold)) is not None
-    ]
-    response_layers.extend(accent_layers)
+    print_layers = create_print_layers_from_image(image)
+    for layer in print_layers:
+        if layer.svg_path and not any(existing.svg_path == layer.svg_path for existing in response_layers):
+            response_layers.append(layer)
 
     return ProcessImageResponse(filename=file.filename, layers=response_layers)

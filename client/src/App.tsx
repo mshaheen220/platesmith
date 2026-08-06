@@ -162,6 +162,20 @@ function App() {
         return newLayer;
       });
 
+      if (newLayers.length === 1) {
+        newLayers.push({
+          id: `layer-${Date.now()}-detail`,
+          name: 'Detail Layer 1',
+          originalColor: '#000000',
+          filamentColorHex: '#000000',
+          layerHeightMm: 0.35,
+          zOffsetMm: cumulativeHeight,
+          opacity: 0.95,
+          isVisible: true,
+          pathData: newLayers[0].pathData,
+        });
+      }
+
       setLayers(newLayers);
     } catch (error) {
       console.error('Error uploading image:', error);
