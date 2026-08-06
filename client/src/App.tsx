@@ -1,21 +1,28 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { Sidebar } from './components/layout/Sidebar';
 import { ThreeCanvas } from './components/viewer/ThreeCanvas';
+import { ViewControls } from './components/viewer/ViewControls';
 import { Sun, Moon, Circle, Lightbulb, LightbulbOff, Upload } from 'lucide-react';
 
+import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 // Import types using 'type' keyword for clarity and correct bundling
 import type { LayerConfig } from './types/project';
 
 const INITIAL_LAYERS: LayerConfig[] = [
-  { id: 'layer-1', name: 'Layer 1 - Black', originalColor: '#000000', filamentColorHex: '#000000', layerHeightMm: 0.8, zOffsetMm: 0, opacity: 1, isVisible: true },
-  { id: 'layer-2', name: 'Layer 2 - Red', originalColor: '#ff0000', filamentColorHex: '#ff0000', layerHeightMm: 0.6, zOffsetMm: 0.8, opacity: 1, isVisible: true },
-  { id: 'layer-3', name: 'Layer 3 - Yellow', originalColor: '#ffff00', filamentColorHex: '#ffff00', layerHeightMm: 0.6, zOffsetMm: 1.4, opacity: 1, isVisible: true },
-  { id: 'layer-4', name: 'Layer 4 - White', originalColor: '#ffffff', filamentColorHex: '#ffffff', layerHeightMm: 0.6, zOffsetMm: 2.0, opacity: 1, isVisible: false },
+  { id: 'layer-1', name: 'Layer 1 - Black', originalColor: '#000000', filamentColorHex: '#000000', layerHeightMm: 0.8, zOffsetMm: 0, opacity: 1, isVisible: true, pathData: '' },
+  { id: 'layer-2', name: 'Layer 2 - Red', originalColor: '#ff0000', filamentColorHex: '#ff0000', layerHeightMm: 0.6, zOffsetMm: 0.8, opacity: 1, isVisible: true, pathData: '' },
+  { id: 'layer-3', name: 'Layer 3 - Yellow', originalColor: '#ffff00', filamentColorHex: '#ffff00', layerHeightMm: 0.6, zOffsetMm: 1.4, opacity: 1, isVisible: true, pathData: '' },
+  { id: 'layer-4', name: 'Layer 4 - White', originalColor: '#ffffff', filamentColorHex: '#ffffff', layerHeightMm: 0.6, zOffsetMm: 2.0, opacity: 1, isVisible: false, pathData: '' },
 ];
+
+interface LayerData {
+  color: string;
+  svg_path: string;
+}
 
 interface ProcessImageResponse {
   filename: string;
-  colors: string[];
+  layers: LayerData[];
 }
 
 function App() {
@@ -29,6 +36,7 @@ function App() {
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   // State for managing canvas background color
   const [canvasBgClass, setCanvasBgClass] = useState<'bg-gray-700' | 'bg-gray-200' | 'bg-gray-500'>('bg-gray-700');
+  const controlsRef = useRef<OrbitControlsImpl>(null);
 
   const handleToggleLayerVisibility = (layerId: string) => {
     setLayers(currentLayers =>
@@ -115,17 +123,18 @@ function App() {
 
       // Generate new layers from the extracted colors
       let cumulativeHeight = 0;
-      const newLayers = result.colors.map((color, index) => {
+      const newLayers = result.layers.map((layerData, index) => {
         const defaultHeight = 0.8; // A default height for new layers
         const newLayer: LayerConfig = {
           id: `layer-${Date.now()}-${index}`,
           name: `Layer ${index + 1}`,
-          originalColor: color,
-          filamentColorHex: color,
+          originalColor: layerData.color,
+          filamentColorHex: layerData.color,
           layerHeightMm: defaultHeight,
           zOffsetMm: cumulativeHeight,
           opacity: 1,
           isVisible: true,
+          pathData: layerData.svg_path,
         };
         cumulativeHeight += defaultHeight;
         return newLayer;
@@ -140,7 +149,7 @@ function App() {
   };
 
   return (
-    <div className="bg-gray-900 text-white min-h-screen flex flex-col font-sans">
+    <div className="bg-gray-900 text-white h-screen flex flex-col font-sans">
       <header className="bg-gray-800 border-b border-gray-700 px-6 py-3 flex items-center gap-3">
         <img src="/favicon/favicon.svg" alt="stack3d logo" className="h-6 w-6" />
         <h1 className="text-xl font-bold tracking-tight">
@@ -155,6 +164,8 @@ function App() {
               <Circle className="ml-2 inline-block h-4 w-4 text-gray-400" />}
         </h1>
       </header>
+      {/* This container is the key to the layout. `flex-1` makes it fill vertical space.
+          `overflow-hidden` is added to ensure its children are strictly contained. */}
       <div className="flex flex-1 overflow-hidden">
         <Sidebar
           layers={layers} // Pass layers data
@@ -171,8 +182,10 @@ function App() {
           isBacklightOn={isBacklightOn}
           onToggleBacklight={handleToggleBacklight}
           onToggleCanvasBackground={handleToggleCanvasBackground} currentCanvasBgClass={canvasBgClass} />
-        <main className="flex-1 flex flex-col">
-          <ThreeCanvas layers={layers} canvasBgClass={canvasBgClass} isExplodedView={isExplodedView} isBacklightOn={isBacklightOn} />
+        {/* The main content area is now a relative container for the canvas and its overlay controls */}
+        <main className="relative flex-1 flex flex-col">
+          <ThreeCanvas layers={layers} canvasBgClass={canvasBgClass} isExplodedView={isExplodedView} isBacklightOn={isBacklightOn} controlsRef={controlsRef} />
+          <ViewControls controlsRef={controlsRef} />
         </main>
       </div>
     </div>

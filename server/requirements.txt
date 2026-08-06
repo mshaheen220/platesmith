@@ -4,3 +4,4 @@ trimesh
 pillow
 numpy
 python-multipart
+opencv-python

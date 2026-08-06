@@ -4,6 +4,9 @@ from typing import Dict, List
 from pydantic import BaseModel
 import io
 from PIL import Image
+import trimesh
+import numpy as np # Already imported, but good to ensure
+import cv2 # Import OpenCV
 
 app = FastAPI(
     title="stack3d Backend",
@@ -21,10 +24,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Define a Pydantic model for a structured, type-safe response.
+# Define Pydantic models for structured, type-safe responses.
+class LayerData(BaseModel):
+    color: str
+    svg_path: str
+
 class ProcessImageResponse(BaseModel):
     filename: str
-    colors: List[str]
+    # The response will now be a list of layer data objects
+    layers: List[LayerData]
 
 def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     """Converts a HEX color string to an (R, G, B) tuple."""
@@ -55,13 +63,74 @@ def merge_similar_colors(hex_colors: List[str], threshold: float) -> List[str]:
             distinct_colors.append(color)
     return distinct_colors
 
+def create_layer_from_color(
+    color_hex: str,
+    quantized_image: Image.Image,
+    palette: List[int],
+    color_distance_threshold: float
+) -> LayerData | None:
+    """Generates a LayerData object containing SVG paths for a given color."""
+    try:
+        mask = Image.new('L', quantized_image.size, 0)
+        target_rgb = hex_to_rgb(color_hex)
+
+        palette_rgb = [tuple(palette[i:i + 3]) for i in range(0, len(palette), 3)]
+        matching_indices = {
+            i for i, rgb in enumerate(palette_rgb)
+            if color_distance(rgb, target_rgb) < color_distance_threshold
+        }
+
+        mask_data = [255 if p in matching_indices else 0 for p in quantized_image.getdata()]
+        mask.putdata(mask_data)
+
+        # Convert the Pillow image to a numpy array and find contours.
+        # This is the most reliable method for extracting paths from a raster image.
+        mask_array = np.array(mask)
+        
+        # OpenCV requires a single-channel 8-bit image.
+        # Our mask_array is already 0 or 255, so it's suitable.
+        # Find contours using OpenCV
+        # RETR_CCOMP retrieves all contours and organizes them into a two-level hierarchy.
+        # CHAIN_APPROX_SIMPLE compresses horizontal, vertical, and diagonal segments.
+        contours_list, hierarchy = cv2.findContours(mask_array, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours_list:
+            return None
+
+        # Process contours and their hierarchy to correctly identify holes
+        polygons = []
+        holes = []
+        # The hierarchy is a list of [Next, Previous, First_Child, Parent]
+        for i, contour in enumerate(contours_list):
+            # A contour is a hole if it has a parent
+            if hierarchy[0][i][3] != -1:
+                holes.append(contour.reshape(-1, 2).astype(np.float64))
+            else:
+                polygons.append(contour.reshape(-1, 2).astype(np.float64))
+        
+        # Create a single Path2D object with both outer polygons and inner holes
+        # This is the correct way to represent complex shapes.
+        combined_path = trimesh.path.Path2D(
+            entities=[trimesh.path.entities.Line(np.arange(len(p))) for p in polygons] +
+                     [trimesh.path.entities.Line(np.arange(len(h))) for h in holes],
+            vertices=np.vstack(polygons + holes) if polygons or holes else []
+        )
+
+        # Export the combined path object to an SVG path string
+        svg_path_string = combined_path.export(file_type='svg')
+        
+        return LayerData(color=color_hex, svg_path=svg_path_string)
+    except Exception as e:
+        print(f"Could not generate path for color {color_hex}: {e}")
+        return None
+
 @app.get("/")
 def read_root() -> Dict[str, str]:
     """A simple endpoint to confirm the server is running."""
     return {"message": "stack3d backend is running!"}
 
 @app.post("/process-image/")
-async def process_image(file: UploadFile = File(...), num_colors: int = 8) -> ProcessImageResponse:
+async def process_image(file: UploadFile = File(...), num_colors: int = 10) -> ProcessImageResponse:
     """
     Processes an uploaded image to extract its dominant colors.
     """
@@ -82,7 +151,7 @@ async def process_image(file: UploadFile = File(...), num_colors: int = 8) -> Pr
     # We convert it to a list of [r, g, b] tuples and then to HEX strings.
     palette = quantized_image.getpalette()
     if palette is None:
-        return ProcessImageResponse(filename=file.filename, colors=[])
+        return ProcessImageResponse(filename=file.filename, layers=[])
         
     rgb_colors = [tuple(palette[i:i + 3]) for i in range(0, len(palette), 3)]
     initial_hex_colors = [f"#{r:02x}{g:02x}{b:02x}" for r, g, b in rgb_colors[:num_colors]]
@@ -91,4 +160,10 @@ async def process_image(file: UploadFile = File(...), num_colors: int = 8) -> Pr
     color_distance_threshold = 40.0
     distinct_colors = merge_similar_colors(initial_hex_colors, color_distance_threshold)
 
-    return ProcessImageResponse(filename=file.filename, colors=distinct_colors)
+    # For each distinct color, generate the geometry in parallel (conceptually)
+    response_layers = [
+        layer for color_hex in distinct_colors
+        if (layer := create_layer_from_color(color_hex, quantized_image, palette, color_distance_threshold)) is not None
+    ]
+
+    return ProcessImageResponse(filename=file.filename, layers=response_layers)
