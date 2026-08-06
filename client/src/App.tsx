@@ -109,7 +109,8 @@ function App() {
     formData.append('file', file);
 
     try {
-      const response = await fetch('http://localhost:8001/process-image/', {
+      const apiBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8001';
+      const response = await fetch(`${apiBaseUrl}/process-image/`, {
         method: 'POST',
         body: formData,
       });

@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "dev:all": "concurrently \"npm run dev\" \"cd ../server && source .venv/bin/activate && uvicorn app.main:app --reload --port 8001\""
+    "dev:all": "node ./scripts/dev-all.mjs"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.8",
