@@ -11,6 +11,33 @@ platesmith converts 2D images (PNG/SVG) into stacked, multi-color 3D printable l
 - **Interactive 3D Canvas**: React Three Fiber live preview with exploded Z-view and dynamic backlit simulation.
 - **Multi-Format Export**: Zip archive containing individual layer STLs with predictable naming.
 
+## Best Image Inputs for Processing
+
+The current backend is a contour-based mask extractor, so it works best with clean, high-contrast source images. Use this checklist before uploading:
+
+- Prefer PNG files over GIFs.
+- Use transparent PNGs when possible; they make subject/background separation much easier.
+- Keep the subject on a clean background with strong contrast.
+- Crop tightly around the subject and remove extra whitespace.
+- Avoid busy backgrounds, shadows, blur, or compressed artifacts.
+- Use high-contrast silhouettes, logos, stickers, or bold illustrations when testing.
+- For photos, keep the subject simple and avoid heavy texture or mixed lighting.
+- Best testing size is usually around 800–1500 px on the longest edge.
+- Avoid extremely small images or very large noisy images.
+- If the image is grayscale or mostly black/white, expect mostly neutral layer colors and fewer chromatic detail layers.
+
+### Good examples
+- logo on transparent background
+- silhouetted object on white background
+- clean illustration with simple shapes
+- crisp black/white art or high-contrast iconography
+
+### Poor examples
+- animated GIFs
+- low-contrast photos with cluttered backgrounds
+- heavily blurred or compressed art
+- images with complex shadows or anti-aliased blends into the background
+
 ## Tech Stack
 - **Frontend**: React (Vite, TypeScript), Tailwind CSS, React Three Fiber / Three.js
 - **Backend**: Node.js / Python (2D vector/raster extrusion engine)

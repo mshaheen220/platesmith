@@ -1,13 +1,12 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Dict, List
-from collections import Counter
-from math import sqrt
+from typing import Dict, List, Tuple
 from pydantic import BaseModel
 import io
 from PIL import Image
 import numpy as np
 import cv2
+from sklearn.cluster import KMeans
 
 app = FastAPI(
     title="platesmith Backend",
@@ -30,243 +29,142 @@ class LayerData(BaseModel):
 
 class ProcessImageResponse(BaseModel):
     filename: str
-    # The response will now be a list of layer data objects
     layers: List[LayerData]
 
-def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
-    """Converts a HEX color string to an (R, G, B) tuple."""
-    hex_color = hex_color.lstrip('#')
-    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
-
-def color_distance(rgb1: tuple[int, int, int], rgb2: tuple[int, int, int]) -> float:
-    """
-    Calculates the Euclidean distance between two RGB colors.
-    A simple measure of color similarity.
-    """
-    r1, g1, b1 = rgb1
-    r2, g2, b2 = rgb2
-    return ((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2) ** 0.5
-
-def merge_similar_colors(hex_colors: List[str], threshold: float) -> List[str]:
-    """
-    Merges a list of HEX colors that are closer to each other than the given threshold.
-    """
-    distinct_colors = []
-    for color in hex_colors:
-        # Check if the current color is similar to any color already in the distinct list
-        is_similar = any(
-            color_distance(hex_to_rgb(color), hex_to_rgb(existing_color)) < threshold
-            for existing_color in distinct_colors
-        )
-        if not is_similar:
-            distinct_colors.append(color)
-    return distinct_colors
-
 def contour_to_path_data(contour: np.ndarray) -> str:
-    points = contour.reshape(-1, 2).astype(np.float64)
+    """Converts a single OpenCV contour into an SVG path data string."""
+    # Reshape contour to a list of points and ensure it's clean
+    points = contour.reshape(-1, 2)
     if len(points) < 3:
-        return ''
-    path_parts = [f"M{points[0][0]:.6f},{points[0][1]:.6f}"]
+        return ""  # Not a valid shape
+
+    # Start the path with a "move to" command
+    path_parts = [f"M {points[0][0]:.2f} {points[0][1]:.2f}"]
+    # Add "line to" commands for the rest of the points
     for point in points[1:]:
-        path_parts.append(f"L{point[0]:.6f},{point[1]:.6f}")
-    path_parts.append('Z')
-    return ' '.join(path_parts)
+        path_parts.append(f"L {point[0]:.2f} {point[1]:.2f}")
+    # Close the path to form a solid shape
+    path_parts.append("Z")
+    return " ".join(path_parts)
 
 
-def create_svg_path_from_mask(mask_array: np.ndarray, use_external_only: bool = False) -> str:
-    """Convert a binary mask into an SVG string with explicit closed paths."""
-    retrieval_mode = cv2.RETR_EXTERNAL if use_external_only else cv2.RETR_CCOMP
-    contours_list, hierarchy = cv2.findContours(mask_array, retrieval_mode, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours_list:
-        return ''
-
-    width = max(mask_array.shape[1], 1)
-    height = max(mask_array.shape[0], 1)
-
-    if use_external_only:
-        contour = max(contours_list, key=cv2.contourArea)
-        path_data = contour_to_path_data(contour)
-        if not path_data:
-            return ''
-        return (
-            f'<svg width="100%" height="100%" viewBox="0 0 {width} {height}" '
-            f'xmlns="http://www.w3.org/2000/svg"><path d="{path_data}" fill="#000000" fill-rule="evenodd" /></svg>'
-        )
-
-    path_elements: List[str] = []
-    for index, contour in enumerate(contours_list):
-        path_data = contour_to_path_data(contour)
-        if not path_data:
-            continue
-        path_elements.append(f'<path d="{path_data}" fill="#000000" fill-rule="evenodd" />')
-
-    if not path_elements:
-        return ''
-
-    body = ''.join(path_elements)
-    return (
-        f'<svg width="100%" height="100%" viewBox="0 0 {width} {height}" '
-        f'xmlns="http://www.w3.org/2000/svg">{body}</svg>'
+def create_svg_path_from_mask(mask_array: np.ndarray, width: int, height: int) -> str:
+    """
+    Converts a binary mask into a full SVG string containing path elements for each contour.
+    This version handles complex shapes with holes by using parent-child contour relationships.
+    """
+    # Find all contours and their hierarchy
+    contours, hierarchy = cv2.findContours(
+        mask_array, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE
     )
 
+    if not contours or hierarchy is None:
+        return ""
 
-def estimate_background_color(image: Image.Image) -> np.ndarray:
-    """Estimate the background color from the image corners."""
-    rgba = np.array(image.convert('RGBA'))
-    height, width = rgba.shape[:2]
-    samples = []
-    for y, x in [(0, 0), (0, width - 1), (height - 1, 0), (height - 1, width - 1)]:
-        if rgba[y, x, 3] > 200:
-            samples.append(rgba[y, x, :3].astype(np.float32))
-    if not samples:
-        return np.array([255, 255, 255], dtype=np.float32)
-    return np.median(np.stack(samples, axis=0), axis=0).astype(np.float32)
+    path_data_list = []
+    # hierarchy[0] contains [Next, Previous, First_Child, Parent]
+    # We iterate through top-level contours (those without a parent)
+    i = 0
+    while i >= 0:
+        contour = contours[i]
+        path_data = contour_to_path_data(contour)
+        path_data_list.append(path_data)
 
+        # Handle holes (child contours)
+        child_i = hierarchy[0][i][2]
+        while child_i >= 0:
+            hole_contour = contours[child_i]
+            hole_path_data = contour_to_path_data(hole_contour)
+            path_data_list.append(hole_path_data)
+            child_i = hierarchy[0][child_i][0]  # Move to the next sibling hole
 
-def create_foreground_mask(image: Image.Image) -> np.ndarray:
-    """Create a foreground mask using transparency, contrast, and background difference."""
-    rgba = np.array(image.convert('RGBA'))
-    alpha = rgba[:, :, 3].astype(np.uint8)
-    rgb = rgba[:, :, :3].astype(np.float32)
+        i = hierarchy[0][i][0] # Move to the next top-level contour
 
-    background_color = estimate_background_color(image)
-    color_distance = np.linalg.norm(rgb - background_color, axis=2)
-    gray = cv2.cvtColor(rgba[:, :, :3].astype(np.uint8), cv2.COLOR_RGBA2GRAY)
+    if not path_data_list:
+        return ""
 
-    transparent_mask = np.where(alpha < 250, 255, 0).astype(np.uint8)
-    contrast_mask = np.where((color_distance > 35.0) | (gray < 220), 255, 0).astype(np.uint8)
-    foreground_mask = cv2.bitwise_or(transparent_mask, contrast_mask)
-
-    foreground_mask = cv2.medianBlur(foreground_mask, 5)
-    foreground_mask = cv2.morphologyEx(foreground_mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-    foreground_mask = cv2.morphologyEx(foreground_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    return foreground_mask
-
-
-def estimate_component_color(image: Image.Image, component_mask: np.ndarray) -> str:
-    """Estimate a dominant hue for a component using the foreground pixels."""
-    rgba = np.array(image.convert('RGBA'))
-    mask = component_mask.astype(bool)
-    if not np.any(mask):
-        return '#000000'
-
-    pixels = rgba[mask]
-    if len(pixels) == 0:
-        return '#000000'
-
-    visible_pixels = pixels[pixels[:, 3] > 128] if pixels.shape[1] >= 4 else pixels
-    if len(visible_pixels) == 0:
-        return '#000000'
-
-    rgb_pixels = visible_pixels[:, :3].astype(np.uint8)
-    if len(rgb_pixels) == 0:
-        return '#000000'
-
-    quantized = (rgb_pixels // 32) * 32
-    color_keys = [tuple(color) for color in quantized]
-    counts = Counter(color_keys)
-    if not counts:
-        return '#000000'
-
-    dominant_color = counts.most_common(1)[0][0]
-    r, g, b = dominant_color
-    return f'#{r:02x}{g:02x}{b:02x}'
-
-
-def create_base_layer_from_image(image: Image.Image) -> LayerData | None:
-    """Create a base silhouette layer for the overall object shape."""
-    try:
-        foreground_mask = create_foreground_mask(image)
-
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(foreground_mask, connectivity=8)
-        if num_labels <= 1:
-            return None
-
-        component_sizes = stats[1:, cv2.CC_STAT_AREA]
-        if len(component_sizes) == 0:
-            return None
-
-        largest_component_index = 1 + int(np.argmax(component_sizes))
-        component_mask = np.where(labels == largest_component_index, 255, 0).astype(np.uint8)
-
-        contours, _ = cv2.findContours(component_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return None
-
-        svg_path = create_svg_path_from_mask(component_mask, use_external_only=False)
-        if not svg_path:
-            return None
-        color = estimate_component_color(image, component_mask)
-        return LayerData(color=color, svg_path=svg_path)
-    except Exception as exc:
-        print(f'Could not create base layer: {exc}')
-        return None
-
-
-def create_print_layers_from_image(image: Image.Image) -> List[LayerData]:
-    """Create a print-oriented layer stack from connected foreground regions."""
-    try:
-        foreground_mask = create_foreground_mask(image)
-
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(foreground_mask, connectivity=8)
-        if num_labels <= 1:
-            return []
-
-        components = []
-        for label_index in range(1, num_labels):
-            area = stats[label_index, cv2.CC_STAT_AREA]
-            if area < 50:
-                continue
-
-            component_mask = np.where(labels == label_index, 255, 0).astype(np.uint8)
-            candidate_masks = [component_mask]
-            if area > 100:
-                eroded_mask = cv2.erode(component_mask, np.ones((3, 3), np.uint8), iterations=1)
-                if cv2.countNonZero(eroded_mask) > 20:
-                    candidate_masks.append(eroded_mask)
-
-            for mask in candidate_masks:
-                svg_path = create_svg_path_from_mask(mask, use_external_only=False)
-                if not svg_path:
-                    continue
-                if any(existing.svg_path == svg_path for _, existing in components):
-                    continue
-                color = estimate_component_color(image, mask)
-                components.append((area, LayerData(color=color, svg_path=svg_path)))
-
-        components.sort(key=lambda item: item[0], reverse=True)
-        return [layer for _, layer in components[:4]]
-    except Exception as exc:
-        print(f'Could not create print layers: {exc}')
-        return []
+    # Combine all paths into one for an even-odd fill rule to handle holes
+    full_path_d = " ".join(path_data_list)
+    
+    # Construct the full SVG string, which is what SVGLoader expects.
+    # The fill and fill-rule are important for correct rendering of holes.
+    return (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">'
+        f'<path d="{full_path_d}" fill="#000" fill-rule="evenodd" />'
+        f'</svg>'
+    )
 
 @app.get("/")
 def read_root() -> Dict[str, str]:
     """A simple endpoint to confirm the server is running."""
     return {"message": "platesmith backend is running!"}
 
-@app.post("/process-image/")
-async def process_image(file: UploadFile = File(...), num_colors: int = 10) -> ProcessImageResponse:
+@app.post("/process-image/", response_model=ProcessImageResponse)
+async def process_image(file: UploadFile = File(...), num_colors: int = 8) -> ProcessImageResponse:
     """
-    Processes an uploaded image to extract its dominant colors.
+    Processes an uploaded image to extract color-based layers using K-Means clustering.
     """
-    # Read the image file into memory
-    contents = await file.read()
-    image = Image.open(io.BytesIO(contents)).convert("RGBA")
+    try:
+        contents = await file.read()
+        image = Image.open(io.BytesIO(contents)).convert("RGBA")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid image file.")
 
-    # Resize the image to a manageable size for faster processing.
-    # This is a crucial step for performance with large images.
+    # Resize for performance. thumbnail maintains aspect ratio.
     max_size = (512, 512)
-    image.thumbnail(max_size)
+    image.thumbnail(max_size, Image.Resampling.LANCZOS)
+    
+    # Convert image to numpy array, handling transparency
+    rgba_image = np.array(image)
+    
+    # Separate RGB and Alpha channels
+    rgb_image = rgba_image[:, :, :3]
+    alpha_channel = rgba_image[:, :, 3]
 
-    base_layer = create_base_layer_from_image(image)
+    # We only want to cluster opaque pixels
+    opaque_pixels = rgb_image[alpha_channel > 128]
+    if len(opaque_pixels) < num_colors:
+        num_colors = len(opaque_pixels)
+    
+    if num_colors == 0:
+        return ProcessImageResponse(filename=file.filename, layers=[])
+
+    # Use K-Means to find the dominant colors
+    kmeans = KMeans(n_clusters=num_colors, random_state=42, n_init=10)
+    kmeans.fit(opaque_pixels)
+
+    # Get the palette (cluster centers) and labels
+    palette = kmeans.cluster_centers_.astype(int)
+    labels = kmeans.predict(rgb_image.reshape(-1, 3))
+    
+    # Reshape labels back to image dimensions
+    labeled_image = labels.reshape(rgb_image.shape[:2])
+
     response_layers: List[LayerData] = []
-    if base_layer is not None:
-        response_layers.append(base_layer)
+    
+    # Create a layer for each color in the palette
+    for i, color in enumerate(palette):
+        # Create a binary mask for the current cluster
+        # Also ensure we respect the original transparency
+        mask = np.zeros(rgb_image.shape[:2], dtype=np.uint8)
+        mask[(labeled_image == i) & (alpha_channel > 128)] = 255
+        
+        # Clean up the mask
+        mask = cv2.medianBlur(mask, 3)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3,3), np.uint8), iterations=1)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), iterations=1)
+        
+        if cv2.countNonZero(mask) < 20: # Ignore tiny, insignificant layers
+            continue
 
-    print_layers = create_print_layers_from_image(image)
-    for layer in print_layers:
-        if layer.svg_path and not any(existing.svg_path == layer.svg_path for existing in response_layers):
-            response_layers.append(layer)
+        # Convert the mask to an SVG path data string
+        svg_path = create_svg_path_from_mask(mask, width=image.width, height=image.height)
+
+        if svg_path:
+            hex_color = f"#{color[0]:02x}{color[1]:02x}{color[2]:02x}"
+            response_layers.append(LayerData(color=hex_color, svg_path=svg_path))
+            
+    # Sort layers from largest to smallest for a sensible default stacking order
+    response_layers.sort(key=lambda layer: len(layer.svg_path), reverse=True)
 
     return ProcessImageResponse(filename=file.filename, layers=response_layers)

@@ -44,7 +44,7 @@ const main = async () => {
     },
   });
 
-  const backend = spawn(backendCommand, ['-m', 'uvicorn', 'app.main:app', '--reload', '--port', String(backendPort)], {
+  const backend = spawn(backendCommand, ['-m', 'uvicorn', 'app.main:app', '--reload', '--reload-dir', 'app', '--port', String(backendPort)], {
     cwd: serverDir,
     stdio: 'inherit',
     env: {

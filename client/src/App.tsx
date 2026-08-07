@@ -28,6 +28,8 @@ interface ProcessImageResponse {
 function App() {
   // State for managing layers
   const [layers, setLayers] = useState<LayerConfig[]>(INITIAL_LAYERS);
+  // State for layer selection
+  const [selectedLayerIds, setSelectedLayerIds] = useState<string[]>([]);
   // State for managing canvas background color
   const [isBacklightOn, setIsBacklightOn] = useState<boolean>(false);
   // State for managing canvas background color
@@ -37,6 +39,58 @@ function App() {
   // State for managing canvas background color
   const [canvasBgClass, setCanvasBgClass] = useState<'bg-gray-700' | 'bg-gray-200' | 'bg-gray-500'>('bg-gray-700');
   const controlsRef = useRef<OrbitControlsImpl>(null);
+
+  const handleToggleLayerSelection = (layerId: string) => {
+    setSelectedLayerIds(prev =>
+      prev.includes(layerId)
+        ? prev.filter(id => id !== layerId)
+        : [...prev, layerId]
+    );
+  };
+
+  const handleMergeLayers = () => {
+    if (selectedLayerIds.length < 2) return;
+
+    setLayers(currentLayers => {
+      const layersToMerge = currentLayers.filter(layer => selectedLayerIds.includes(layer.id));
+      const remainingLayers = currentLayers.filter(layer => !selectedLayerIds.includes(layer.id));
+
+      const baseLayer = layersToMerge.reduce((acc, layer) =>
+        (layer.pathData.length > acc.pathData.length) ? layer : acc
+      );
+
+      const extractPathD = (svgString: string) => {
+        const match = svgString.match(/<path d="([^"]+)"/);
+        return match ? match[1] : '';
+      };
+      
+      const allPathDs = layersToMerge.map(layer => extractPathD(layer.pathData)).join(' ');
+      const { width, height } = baseLayer.pathData.match(/<svg width="(?<width>\d+)" height="(?<height>\d+)"/)?.groups ?? { width: 300, height: 300 };
+
+
+      const mergedLayer: LayerConfig = {
+        ...baseLayer,
+        id: `layer-merged-${Date.now()}`,
+        name: `${baseLayer.name} (Merged)`,
+        pathData: `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg"><path d="${allPathDs}" fill="#000" fill-rule="evenodd" /></svg>`,
+      };
+
+      const insertIndex = currentLayers.findIndex(l => l.id === baseLayer.id);
+      remainingLayers.splice(insertIndex, 0, mergedLayer);
+      
+      // Recalculate z-offsets
+      let cumulativeHeight = 0;
+      const newLayers = remainingLayers.map(layer => {
+        const updatedLayer = { ...layer, zOffsetMm: cumulativeHeight };
+        cumulativeHeight += layer.layerHeightMm;
+        return updatedLayer;
+      });
+
+      return newLayers;
+    });
+
+    setSelectedLayerIds([]);
+  };
 
   const handleToggleLayerVisibility = (layerId: string) => {
     setLayers(currentLayers =>
@@ -67,17 +121,14 @@ function App() {
     });
   };
 
-  const moveLayer = (layerId: string, direction: -1 | 1) => {
+  const handleDragEnd = (result: { destination: any; source: any; }) => {
+    const { destination, source } = result;
+    if (!destination) return;
+
     setLayers(currentLayers => {
-      const index = currentLayers.findIndex(layer => layer.id === layerId);
-      if (index === -1) return currentLayers;
-
-      const targetIndex = index + direction;
-      if (targetIndex < 0 || targetIndex >= currentLayers.length) return currentLayers;
-
       const reordered = [...currentLayers];
-      const [movedLayer] = reordered.splice(index, 1);
-      reordered.splice(targetIndex, 0, movedLayer);
+      const [movedLayer] = reordered.splice(source.index, 1);
+      reordered.splice(destination.index, 0, movedLayer);
 
       let cumulativeHeight = 0;
       return reordered.map(layer => {
@@ -207,11 +258,14 @@ function App() {
           layers={layers} // Pass layers data
           onImageUpload={handleImageUpload}
           isProcessing={isProcessing}
+          selectedLayerIds={selectedLayerIds}
+          onToggleLayerSelection={handleToggleLayerSelection}
+          onMergeLayers={handleMergeLayers}
+          onDragEnd={handleDragEnd}
           onToggleVisibility={handleToggleLayerVisibility}
           onLayerHeightChange={handleLayerHeightChange}
           onLayerColorChange={handleLayerColorChange}
           onLayerOpacityChange={handleLayerOpacityChange}
-          onMoveLayer={moveLayer}
           // Pass exploded view state and handler
           isExplodedView={isExplodedView}
           onToggleExplodedView={handleToggleExplodedView}
