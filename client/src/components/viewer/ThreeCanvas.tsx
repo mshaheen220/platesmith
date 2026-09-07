@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { SVGLoader } from 'three/examples/jsm/loaders/SVGLoader.js';
 import { useEffect, useMemo, useRef } from 'react';
 import type { LayerConfig } from '../../types/project';
+import { getImageDimsPx } from '../../lib/svgGeometry';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 
 interface ThreeCanvasProps {
@@ -19,8 +20,6 @@ interface ThreeCanvasProps {
   fitToContentRef: React.RefObject<(() => void) | null>;
 }
 
-const SVG_DIMS_RE = /width="(\d+(?:\.\d+)?)"\s+height="(\d+(?:\.\d+)?)"/;
-
 // Converts millimeters from the data model to scene units for rendering. Shared at
 // module scope (not just a local inside ThreeCanvas) because LayerGeometry's backlight
 // material also needs it: meshPhysicalMaterial's transmission shader scales `thickness`
@@ -34,19 +33,6 @@ const MM_TO_SCENE_UNITS = 0.1;
 // simulation - not measured from any real filament, just tuned so the app's typical
 // layer heights (0.2-4mm) produce a visible glowing-to-blocked range.
 const ATTENUATION_DISTANCE_MM = 1.5;
-
-// The source image's pixel dimensions, read from whichever layer actually has geometry.
-// Mirrors the backend's own dimension parsing so the preview and the export agree on
-// what "plate width" scales against. Falls back to a nominal size for the placeholder
-// demo layers, which carry no real geometry.
-function getImageDimsPx(layers: LayerConfig[]): { width: number; height: number } {
-  for (const layer of layers) {
-    const svg = layer.accumulatedPathData ?? layer.pathData;
-    const match = svg?.match(SVG_DIMS_RE);
-    if (match) return { width: parseFloat(match[1]), height: parseFloat(match[2]) };
-  }
-  return { width: 300, height: 300 };
-}
 
 function LayerGeometry({ layer, isBacklightOn }: { layer: LayerConfig; isBacklightOn: boolean }) {
   // Extrude the accumulated (support-aware) footprint, not the layer's raw own-color
@@ -99,7 +85,10 @@ function LayerGeometry({ layer, isBacklightOn }: { layer: LayerConfig; isBacklig
           transmission={1}
           thickness={layer.layerHeightMm}
           ior={1.45}
-          roughness={0.4}
+          // A diffuser's job is to scatter light evenly rather than pass it through
+          // crisply - much higher roughness gives it that frosted look instead of a
+          // clear/tinted-glass appearance like the color layers above it.
+          roughness={layer.isDiffuser ? 0.95 : 0.4}
           attenuationColor={layer.filamentColorHex}
           attenuationDistance={ATTENUATION_DISTANCE_MM * MM_TO_SCENE_UNITS}
         />

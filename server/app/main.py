@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from typing import Dict, List, Optional, Tuple
@@ -34,17 +34,33 @@ app.add_middleware(
 class LayerData(BaseModel):
     color: str
     svg_path: str
+    # True for the synthetic layer built from the image's transparent region (an
+    # "outside color" the caller opted into), as opposed to a color extracted from
+    # opaque pixels via clustering. Lets the frontend name it distinctly.
+    is_background: bool = False
 
 class ProcessImageResponse(BaseModel):
     filename: str
     layers: List[LayerData]
 
 
-def relative_luminance(color: np.ndarray) -> float:
-    """Perceptual brightness (ITU-R BT.601 luma) of an RGB color, used to order
-    extracted layers from brightest (base) to darkest (top) by default."""
+def relative_luminance(color) -> float:
+    """Perceptual brightness (ITU-R BT.601 luma) of an RGB color (any 3-length
+    r,g,b sequence - a numpy array row or a plain tuple), used to order extracted
+    layers from brightest (base) to darkest (top) by default."""
     r, g, b = int(color[0]), int(color[1]), int(color[2])
     return 0.299 * r + 0.587 * g + 0.114 * b
+
+
+def parse_hex_color(value: str) -> Tuple[int, int, int]:
+    """Parses a "#rrggbb" (or "rrggbb") string into an (r, g, b) int tuple."""
+    cleaned = value.strip().lstrip("#")
+    if len(cleaned) != 6:
+        raise HTTPException(status_code=400, detail="background_color must be a hex color like #rrggbb.")
+    try:
+        return (int(cleaned[0:2], 16), int(cleaned[2:4], 16), int(cleaned[4:6], 16))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="background_color must be a hex color like #rrggbb.")
 
 
 def contour_to_path_data(contour: np.ndarray) -> str:
@@ -319,6 +335,11 @@ class ExportRequest(BaseModel):
     # Optional nozzle/slicer layer height, used only to flag filament-swap
     # points that don't land on an achievable physical layer boundary.
     printer_layer_height_mm: Optional[float] = None
+    # Many printer profiles use a taller first layer for bed adhesion. When set,
+    # physical layer boundaries are computed as first_layer_height_mm +
+    # k*printer_layer_height_mm instead of plain multiples of printer_layer_height_mm.
+    # Leave unset to assume the first layer is the same height as the rest.
+    first_layer_height_mm: Optional[float] = None
 
 
 def _safe_filename_part(name: str) -> str:
@@ -335,6 +356,14 @@ def _build_export_readme(manifest: dict) -> str:
     ]
     if manifest["printer_layer_height_mm"]:
         lines.append(f"Printer layer height: {manifest['printer_layer_height_mm']}mm")
+    if manifest.get("first_layer_height_mm"):
+        lines.append(f"First layer height: {manifest['first_layer_height_mm']}mm")
+    if manifest.get("assembled_filename"):
+        lines.append(
+            f"Assembled preview: {manifest['assembled_filename']} - the whole stack in one file, "
+            "correctly positioned, for looking at as a whole. It has no color information (STL can't "
+            "carry that) and is not meant to be sliced - slice the per-layer STLs below, one at a time."
+        )
     lines.append("")
     lines.append("Layers (bottom to top):")
     for layer in manifest["layers"]:
@@ -344,21 +373,29 @@ def _build_export_readme(manifest: dict) -> str:
             f"[{layer['filename'] or layer['status']}]"
         )
     lines.append("")
-    lines.append("Filament swap points (pause the printer BEFORE printing past this Z height):")
+    lines.append(
+        "Filament swap points (if your slicer inserts a pause/color-change \"at layer N\","
+    )
+    lines.append(
+        "that means before layer N starts printing - use the print layer number below):"
+    )
     if not manifest["filament_swap_points"]:
         lines.append("  (none - single-layer plate)")
     for point in manifest["filament_swap_points"]:
         note = ""
+        layer_note = ""
         if "aligned_to_printer_layer_height" in point:
-            note = (
-                "  [OK: lands on a printer layer boundary]"
-                if point["aligned_to_printer_layer_height"]
-                else "  [WARNING: does not land on a printer layer boundary - "
-                "adjust layer heights or the printer layer height]"
-            )
+            if point["aligned_to_printer_layer_height"]:
+                note = "  [OK: lands on a printer layer boundary]"
+                layer_note = f"  -> at print layer {point['print_layer_number']}"
+            else:
+                note = (
+                    "  [WARNING: does not land on a printer layer boundary - "
+                    "adjust layer heights or the printer layer height]"
+                )
         lines.append(
             f"  z = {point['pause_at_z_mm']}mm  "
-            f"(between \"{point['after_layer']}\" and \"{point['before_layer']}\"){note}"
+            f"(between \"{point['after_layer']}\" and \"{point['before_layer']}\"){note}{layer_note}"
         )
     return "\n".join(lines) + "\n"
 
@@ -399,6 +436,13 @@ def export_plate(request: ExportRequest) -> StreamingResponse:
     manifest_layers = []
     total_height_mm = 0.0
     zip_buffer = io.BytesIO()
+    # Each layer's mesh is already positioned at its real world-space Z (see
+    # extrude_mask_to_mesh's translate), so concatenating them all reproduces the
+    # assembled stack exactly - no re-alignment needed. This is a reference/preview
+    # mesh only (multiple watertight shells in one file, no per-shell color data -
+    # STL has no standard way to carry that) - the per-layer STLs are still what
+    # actually gets sliced and printed one color at a time.
+    meshes_for_assembly: List[trimesh.Trimesh] = []
 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for index, layer in enumerate(request.layers):
@@ -412,6 +456,7 @@ def export_plate(request: ExportRequest) -> StreamingResponse:
             filename = f"{index + 1:02d}_{_safe_filename_part(layer.name)}_{layer.color_hex.lstrip('#')}.stl"
             if mesh is not None and len(mesh.faces) > 0:
                 zf.writestr(filename, mesh.export(file_type="stl"))
+                meshes_for_assembly.append(mesh)
                 status = "exported"
             else:
                 filename = None
@@ -442,16 +487,49 @@ def export_plate(request: ExportRequest) -> StreamingResponse:
                 "pause_at_z_mm": z,
             }
             if request.printer_layer_height_mm and request.printer_layer_height_mm > 0:
-                remainder = z % request.printer_layer_height_mm
-                point["aligned_to_printer_layer_height"] = bool(
-                    min(remainder, request.printer_layer_height_mm - remainder) < 1e-3
+                # Physical layer boundaries sit at first_layer_height_mm +
+                # k*printer_layer_height_mm - a taller first layer (common for bed
+                # adhesion) shifts every later boundary by that one-time offset, so this
+                # isn't just z % printer_layer_height_mm once a first-layer height is set.
+                effective_first_layer_height_mm = (
+                    request.first_layer_height_mm
+                    if request.first_layer_height_mm and request.first_layer_height_mm > 0
+                    else request.printer_layer_height_mm
                 )
+                offset = z - effective_first_layer_height_mm
+                if offset < -1e-3:
+                    aligned = False
+                    point["aligned_to_printer_layer_height"] = False
+                    point["print_layer_number"] = None
+                else:
+                    clamped_offset = max(0.0, offset)
+                    remainder = clamped_offset % request.printer_layer_height_mm
+                    aligned = min(remainder, request.printer_layer_height_mm - remainder) < 1e-3
+                    point["aligned_to_printer_layer_height"] = bool(aligned)
+                    # Slicers that let you insert a pause "at layer N" trigger it BEFORE
+                    # layer N prints, so this is completed-layers + 1 - the number to
+                    # actually enter, not the completed-layer count (which would pause
+                    # one layer too early).
+                    completed_layers = 1 + clamped_offset / request.printer_layer_height_mm
+                    point["print_layer_number"] = round(completed_layers) + 1 if aligned else None
             swap_points.append(point)
+
+        assembled_filename = None
+        if meshes_for_assembly:
+            assembled_mesh = (
+                trimesh.util.concatenate(meshes_for_assembly)
+                if len(meshes_for_assembly) > 1
+                else meshes_for_assembly[0]
+            )
+            assembled_filename = "00_assembled_preview.stl"
+            zf.writestr(assembled_filename, assembled_mesh.export(file_type="stl"))
 
         manifest = {
             "plate_width_mm": request.plate_width_mm,
             "total_height_mm": round(total_height_mm, 4),
             "printer_layer_height_mm": request.printer_layer_height_mm,
+            "first_layer_height_mm": request.first_layer_height_mm,
+            "assembled_filename": assembled_filename,
             "layers": manifest_layers,
             "filament_swap_points": swap_points,
         }
@@ -472,7 +550,15 @@ def read_root() -> Dict[str, str]:
     return {"message": "platesmith backend is running!"}
 
 @app.post("/process-image/", response_model=ProcessImageResponse)
-async def process_image(file: UploadFile = File(...), num_colors: int = 8) -> ProcessImageResponse:
+async def process_image(
+    file: UploadFile = File(...),
+    num_colors: int = Form(8),
+    # Optional "outside color": fills the image's transparent region as its own layer,
+    # so a subject cut out on a transparent background becomes a solid rectangular
+    # plate instead of a subject-shaped void. Must be requested at upload time - the
+    # source image isn't retained server-side afterward, so this can't be added later.
+    background_color: Optional[str] = Form(None),
+) -> ProcessImageResponse:
     """
     Processes an uploaded image to extract color-based layers using K-Means clustering.
     """
@@ -537,6 +623,19 @@ async def process_image(file: UploadFile = File(...), num_colors: int = 8) -> Pr
             layers_with_luminance.append(
                 (relative_luminance(color), LayerData(color=hex_color, svg_path=svg_path))
             )
+
+    if background_color:
+        bg_rgb = parse_hex_color(background_color)
+        outside_mask = np.zeros(rgb_image.shape[:2], dtype=np.uint8)
+        outside_mask[alpha_channel <= 128] = 255
+
+        if cv2.countNonZero(outside_mask) >= 20:  # skip if the image has no real transparency
+            outside_svg_path = create_svg_path_from_mask(outside_mask, width=image.width, height=image.height)
+            if outside_svg_path:
+                bg_hex = f"#{bg_rgb[0]:02x}{bg_rgb[1]:02x}{bg_rgb[2]:02x}"
+                layers_with_luminance.append(
+                    (relative_luminance(bg_rgb), LayerData(color=bg_hex, svg_path=outside_svg_path, is_background=True))
+                )
 
     # Brightest color first (becomes the base/bottom layer, closest to a backlight),
     # darkest last (becomes the topmost/front layer, closest to the viewer). This

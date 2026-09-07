@@ -4,6 +4,7 @@ import { ThreeCanvas } from './components/viewer/ThreeCanvas';
 import { ViewControls } from './components/viewer/ViewControls';
 import { Sun, Moon, Circle, Lightbulb } from 'lucide-react';
 import { version as appVersion } from '../package.json';
+import { getImageDimsPxOrNull, buildRectPathData } from './lib/svgGeometry';
 
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 // Import types using 'type' keyword for clarity and correct bundling
@@ -24,6 +25,7 @@ const INITIAL_LAYERS: LayerConfig[] = [
 interface LayerData {
   color: string;
   svg_path: string;
+  is_background: boolean;
 }
 
 interface ProcessImageResponse {
@@ -64,6 +66,11 @@ function App() {
   // Nozzle/slicer layer height, used only to flag filament-swap points that don't
   // land on an achievable physical layer boundary. Optional - leave blank to skip the check.
   const [printerLayerHeightMm, setPrinterLayerHeightMm] = useState<number | null>(0.2);
+  // Many people print a taller first layer for bed adhesion (e.g. 0.24mm first layer,
+  // 0.2mm rest) - when set, swap-point math accounts for that one-time offset instead
+  // of assuming every physical layer is printerLayerHeightMm tall. Leave blank to
+  // assume the first layer is the same height as the rest.
+  const [firstLayerHeightMm, setFirstLayerHeightMm] = useState<number | null>(null);
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const controlsRef = useRef<OrbitControlsImpl>(null);
   const fitToContentRef = useRef<(() => void) | null>(null);
@@ -197,13 +204,27 @@ function App() {
   };
 
   // Rounds every layer's height to the nearest multiple of the printer's slicer layer
-  // height. A filament-swap point sits at the cumulative sum of the layers below it, and
-  // a sum of multiples of X is itself a multiple of X - so this is sufficient to put every
-  // swap point on an achievable physical layer boundary, not just the ones already close.
+  // height, so the cumulative Z at every swap point lands on an achievable physical
+  // layer boundary (a sum of multiples of X is itself a multiple of X). The bottommost
+  // visible layer is special-cased against firstLayerHeightMm instead, when set - it's
+  // physically the first layer printed, so its height determines where the *second*
+  // layer boundary falls (firstLayerHeightMm + k*printerLayerHeightMm), not a plain
+  // multiple of printerLayerHeightMm. Rounding every other layer to plain multiples on
+  // top of that still keeps every later cumulative Z on that same offset grid.
   const handleSnapToLayerGrid = () => {
     if (!printerLayerHeightMm || printerLayerHeightMm <= 0) return;
+    const effectiveFirstLayerHeightMm =
+      firstLayerHeightMm && firstLayerHeightMm > 0 ? firstLayerHeightMm : printerLayerHeightMm;
+    const firstVisibleIndex = layers.findIndex(l => l.isVisible);
 
-    const snapped = layers.map(layer => {
+    const snapped = layers.map((layer, index) => {
+      if (index === firstVisibleIndex) {
+        const extraLayers = Math.max(
+          0,
+          Math.round((layer.layerHeightMm - effectiveFirstLayerHeightMm) / printerLayerHeightMm)
+        );
+        return { ...layer, layerHeightMm: effectiveFirstLayerHeightMm + extraLayers * printerLayerHeightMm };
+      }
       const layerCount = Math.max(1, Math.round(layer.layerHeightMm / printerLayerHeightMm));
       return { ...layer, layerHeightMm: layerCount * printerLayerHeightMm };
     });
@@ -243,6 +264,14 @@ function App() {
     );
   };
 
+  const handleLayerNameChange = (layerId: string, newName: string) => {
+    setLayers(currentLayers =>
+      currentLayers.map(layer =>
+        layer.id === layerId ? { ...layer, name: newName } : layer
+      )
+    );
+  };
+
   const handleToggleBacklight = () => {
     setIsBacklightOn(prev => !prev);
   };
@@ -272,6 +301,7 @@ function App() {
           })),
           plate_width_mm: plateWidthMm,
           printer_layer_height_mm: printerLayerHeightMm,
+          first_layer_height_mm: firstLayerHeightMm,
         }),
       });
 
@@ -295,12 +325,47 @@ function App() {
     }
   };
 
-  const handleImageUpload = async (file: File) => {
+  // Adds or removes a full-canvas rectangle of clear/natural filament as the
+  // bottommost layer, to diffuse the backlight evenly before it reaches the color
+  // layers above. Pure geometry - no image analysis needed - so this can be a
+  // simple client-side toggle rather than requiring a re-upload.
+  const handleToggleDiffuserLayer = () => {
+    const hasDiffuser = layers.some(layer => layer.isDiffuser);
+
+    let newLayers: LayerConfig[];
+    if (hasDiffuser) {
+      newLayers = computeZOffsets(layers.filter(layer => !layer.isDiffuser));
+    } else {
+      const dims = getImageDimsPxOrNull(layers);
+      if (!dims) return; // no image processed yet - nothing to size the diffuser to
+
+      const diffuserLayer: LayerConfig = {
+        id: `layer-diffuser-${Date.now()}`,
+        name: 'Diffuser Base',
+        originalColor: '#f2f2f2',
+        filamentColorHex: '#f2f2f2',
+        layerHeightMm: 0.4,
+        zOffsetMm: 0,
+        isVisible: true,
+        isDiffuser: true,
+        pathData: buildRectPathData(dims.width, dims.height),
+      };
+      newLayers = computeZOffsets([diffuserLayer, ...layers]);
+    }
+
+    setLayers(newLayers);
+    accumulateLayers(newLayers);
+  };
+
+  const handleImageUpload = async (file: File, backgroundColorHex?: string) => {
     if (!file) return;
 
     setIsProcessing(true);
     const formData = new FormData();
     formData.append('file', file);
+    if (backgroundColorHex) {
+      formData.append('background_color', backgroundColorHex);
+    }
 
     try {
       const apiBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8001';
@@ -316,10 +381,12 @@ function App() {
       const result: ProcessImageResponse = await response.json();
       console.log('Backend response:', result);
 
-      // Generate new layers from the extracted colors
+      // Generate new layers from the extracted colors. "Layer N" rather than the old
+      // "Base Layer" for index 0 - that name collided with the diffuser's "Diffuser
+      // Base", implying they were the same kind of thing when they aren't.
       const extractedLayers = result.layers.map((layerData, index) => {
         const isBaseLayer = index === 0;
-        const name = isBaseLayer ? 'Base Layer' : `Detail Layer ${index}`;
+        const name = layerData.is_background ? 'Background' : `Layer ${index + 1}`;
         const newLayer: LayerConfig = {
           id: `layer-${Date.now()}-${index}`,
           name,
@@ -328,6 +395,7 @@ function App() {
           layerHeightMm: isBaseLayer ? 1.2 : 0.35,
           zOffsetMm: 0,
           isVisible: true,
+          isBackgroundFill: layerData.is_background,
           pathData: layerData.svg_path,
         };
         return newLayer;
@@ -336,7 +404,7 @@ function App() {
       if (extractedLayers.length === 1) {
         extractedLayers.push({
           id: `layer-${Date.now()}-detail`,
-          name: 'Detail Layer 1',
+          name: 'Layer 2',
           originalColor: '#000000',
           filamentColorHex: '#000000',
           layerHeightMm: 0.35,
@@ -384,12 +452,14 @@ function App() {
           onToggleLayerSelection={handleToggleLayerSelection}
           onMergeLayers={handleMergeLayers}
           onUnmergeLayer={handleUnmergeLayer}
+          onToggleDiffuserLayer={handleToggleDiffuserLayer}
           onDragEnd={handleDragEnd}
           onToggleVisibility={handleToggleLayerVisibility}
           onLayerHeightChange={handleLayerHeightChange}
           maxLayerHeightMm={MAX_LAYER_HEIGHT_MM}
           onSnapToLayerGrid={handleSnapToLayerGrid}
           onLayerColorChange={handleLayerColorChange}
+          onLayerNameChange={handleLayerNameChange}
           // Pass exploded view state and handler
           isExplodedView={isExplodedView}
           onToggleExplodedView={handleToggleExplodedView}
@@ -402,6 +472,8 @@ function App() {
           onPlateWidthChange={setPlateWidthMm}
           printerLayerHeightMm={printerLayerHeightMm}
           onPrinterLayerHeightChange={setPrinterLayerHeightMm}
+          firstLayerHeightMm={firstLayerHeightMm}
+          onFirstLayerHeightChange={setFirstLayerHeightMm}
           onExport={handleExport}
           isExporting={isExporting} />
         {/* The main content area is now a relative container for the canvas and its overlay controls */}

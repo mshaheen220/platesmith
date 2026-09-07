@@ -34,4 +34,17 @@ export interface LayerConfig {
   // already-merged layer flattens its mergedFrom rather than nesting), and never
   // set on a layer that hasn't been merged.
   mergedFrom?: LayerConfig[];
+
+  // A synthetic, non-extracted rectangle spanning the full image canvas, meant to be
+  // printed in clear/natural filament as the bottommost layer so it diffuses the
+  // backlight evenly before it reaches the color layers above. Added/removed via a
+  // dedicated toggle, not part of the normal color-extraction or luminance ordering -
+  // it's always forced to the bottom regardless of its (light) color.
+  isDiffuser?: boolean;
+
+  // A layer synthesized server-side from the source image's transparent region (an
+  // "outside/background" fill color chosen at upload time), rather than extracted from
+  // opaque pixels via clustering. Unlike isDiffuser, it participates normally in the
+  // luminance-based stacking order - only its origin/name differ from an extracted layer.
+  isBackgroundFill?: boolean;
 }

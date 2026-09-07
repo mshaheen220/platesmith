@@ -1,22 +1,24 @@
 import { useState, useEffect, type ReactNode } from 'react';
-import { Eye, EyeOff, Sun, Moon, Circle, Layers, Split, Lightbulb, LightbulbOff, Upload, LoaderCircle, Merge, Ungroup, GripVertical, Download, AlertTriangle, ChevronDown, Magnet } from 'lucide-react';
+import { Eye, EyeOff, Sun, Moon, Circle, Layers, Split, Lightbulb, LightbulbOff, Upload, LoaderCircle, Merge, Ungroup, GripVertical, Download, AlertTriangle, ChevronDown, Magnet, Plus, X } from 'lucide-react';
 import type { LayerConfig } from '../../types/project';
 import { DragDropContext, Droppable, Draggable, type DropResult } from '@hello-pangea/dnd';
 
 interface SidebarProps {
   layers: LayerConfig[];
-  onImageUpload: (file: File) => void;
+  onImageUpload: (file: File, backgroundColorHex?: string) => void;
   isProcessing: boolean;
   selectedLayerIds: string[];
   onToggleLayerSelection: (layerId: string) => void;
   onMergeLayers: () => void;
   onUnmergeLayer: (layerId: string) => void;
+  onToggleDiffuserLayer: () => void;
   onDragEnd: (result: DropResult) => void;
   onToggleVisibility: (layerId: string) => void;
   onLayerHeightChange: (layerId: string, newHeight: number) => void;
   maxLayerHeightMm: number;
   onSnapToLayerGrid: () => void;
   onLayerColorChange: (layerId: string, newColor: string) => void;
+  onLayerNameChange: (layerId: string, newName: string) => void;
   isExplodedView: boolean;
   onToggleExplodedView: () => void;
   isBacklightOn: boolean;
@@ -27,6 +29,8 @@ interface SidebarProps {
   onPlateWidthChange: (widthMm: number) => void;
   printerLayerHeightMm: number | null;
   onPrinterLayerHeightChange: (heightMm: number | null) => void;
+  firstLayerHeightMm: number | null;
+  onFirstLayerHeightChange: (heightMm: number | null) => void;
   onExport: () => void;
   isExporting: boolean;
 }
@@ -72,12 +76,14 @@ export function Sidebar({
   onToggleLayerSelection,
   onMergeLayers,
   onUnmergeLayer,
+  onToggleDiffuserLayer,
   onDragEnd,
   onToggleVisibility,
   onLayerHeightChange,
   maxLayerHeightMm,
   onSnapToLayerGrid,
   onLayerColorChange,
+  onLayerNameChange,
   isExplodedView,
   onToggleExplodedView,
   isBacklightOn,
@@ -88,11 +94,15 @@ export function Sidebar({
   onPlateWidthChange,
   printerLayerHeightMm,
   onPrinterLayerHeightChange,
+  firstLayerHeightMm,
+  onFirstLayerHeightChange,
   onExport,
   isExporting,
 }: SidebarProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
+  const [fillTransparentBg, setFillTransparentBg] = useState(false);
+  const [backgroundColorHex, setBackgroundColorHex] = useState('#ffffff');
   const [openSections, setOpenSections] = useState<Record<SectionKey, boolean>>({
     image: true,
     layers: true,
@@ -121,7 +131,7 @@ export function Sidebar({
 
   const handleUploadClick = () => {
     if (selectedFile) {
-      onImageUpload(selectedFile);
+      onImageUpload(selectedFile, fillTransparentBg ? backgroundColorHex : undefined);
     }
   };
 
@@ -133,13 +143,31 @@ export function Sidebar({
   const swapPoints = visibleLayers.slice(0, -1).map((layer, i) => {
     const z = layer.zOffsetMm + layer.layerHeightMm;
     let alignedToLayerHeight: boolean | null = null;
+    // How many physical printer layers have completed by this Z height - only
+    // meaningful once we know the printer's own slicer layer height. Accounts for a
+    // taller first layer (common for bed adhesion): physical layer boundaries sit at
+    // firstLayerHeightMm + k*printerLayerHeightMm, not plain multiples of
+    // printerLayerHeightMm, once a first-layer height is set.
+    let printLayerNumber: number | null = null;
     if (printerLayerHeightMm && printerLayerHeightMm > 0) {
-      const remainder = z % printerLayerHeightMm;
-      alignedToLayerHeight = Math.min(remainder, printerLayerHeightMm - remainder) < 1e-3;
+      const effectiveFirstLayerHeightMm =
+        firstLayerHeightMm && firstLayerHeightMm > 0 ? firstLayerHeightMm : printerLayerHeightMm;
+      const offset = z - effectiveFirstLayerHeightMm;
+      if (offset < -1e-3) {
+        // Falls before even the first physical layer would finish - no valid boundary here.
+        alignedToLayerHeight = false;
+      } else {
+        const clampedOffset = Math.max(0, offset);
+        const remainder = clampedOffset % printerLayerHeightMm;
+        alignedToLayerHeight = Math.min(remainder, printerLayerHeightMm - remainder) < 1e-3;
+        printLayerNumber = 1 + clampedOffset / printerLayerHeightMm;
+      }
     }
-    return { z, alignedToLayerHeight, afterName: layer.name, beforeName: visibleLayers[i + 1].name };
+    return { z, alignedToLayerHeight, printLayerNumber, afterName: layer.name, beforeName: visibleLayers[i + 1].name };
   });
   const hasOffGridSwapPoints = swapPoints.some(point => point.alignedToLayerHeight === false);
+  const hasDiffuser = layers.some(l => l.isDiffuser);
+  const hasProcessedImage = layers.some(l => l.pathData);
 
   return (
     <aside className="w-96 bg-gray-800 border-r border-gray-700 flex flex-col">
@@ -156,6 +184,31 @@ export function Sidebar({
                   <img src={imagePreviewUrl} alt="Selected preview" className="max-h-32 rounded" />
                 </div>
               )}
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="fill-transparent-bg"
+                  checked={fillTransparentBg}
+                  onChange={(e) => setFillTransparentBg(e.target.checked)}
+                  className="form-checkbox h-4 w-4 bg-gray-800 border-gray-600 rounded text-blue-500 focus:ring-blue-500"
+                />
+                <label
+                  htmlFor="fill-transparent-bg"
+                  className="text-sm text-gray-300"
+                  title="Fills whatever's transparent in the source image with this color, as its own layer, instead of leaving that area unprinted - turns a subject cut out on a transparent background into a solid rectangular plate. Must be set before uploading."
+                >
+                  Fill transparent background
+                </label>
+                {fillTransparentBg && (
+                  <input
+                    type="color"
+                    value={backgroundColorHex}
+                    onChange={(e) => setBackgroundColorHex(e.target.value)}
+                    title="Background fill color"
+                    className="w-8 h-6 rounded cursor-pointer bg-gray-800 border border-gray-600"
+                  />
+                )}
+              </div>
               <button onClick={handleUploadClick} disabled={!selectedFile || isProcessing} className="w-full flex items-center justify-center gap-2 bg-blue-600 text-white font-bold py-2 px-4 rounded hover:bg-blue-700 disabled:bg-gray-500 disabled:cursor-not-allowed">
                 {isProcessing ? <LoaderCircle className="animate-spin" /> : <Upload size={16} />}
                 <span>{isProcessing ? 'Processing...' : 'Upload & Process'}</span>
@@ -189,20 +242,27 @@ export function Sidebar({
                             className={`bg-gray-700/50 p-3 rounded space-y-2 ${snapshot.isDragging ? 'bg-gray-600' : ''}`}
                           >
                             <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <div {...provided.dragHandleProps} className="cursor-grab text-gray-500">
+                              <div className="flex items-center gap-2 flex-1 min-w-0">
+                                <div {...provided.dragHandleProps} className="cursor-grab text-gray-500 flex-shrink-0">
                                   <GripVertical size={20} />
                                 </div>
                                 <input
                                   type="checkbox"
                                   checked={selectedLayerIds.includes(layer.id)}
                                   onChange={() => onToggleLayerSelection(layer.id)}
-                                  className="form-checkbox h-4 w-4 bg-gray-800 border-gray-600 rounded text-blue-500 focus:ring-blue-500"
+                                  title="Select for merging"
+                                  className="form-checkbox h-3 w-3 bg-gray-800 border-gray-600 rounded-sm text-blue-500 focus:ring-blue-500 focus:ring-offset-0 flex-shrink-0"
                                 />
-                                <div className="relative w-5 h-5 rounded-sm border-2 border-gray-500 cursor-pointer" style={{ backgroundColor: layer.filamentColorHex }}>
+                                <div className="relative w-5 h-5 rounded-sm border-2 border-gray-500 cursor-pointer flex-shrink-0" style={{ backgroundColor: layer.filamentColorHex }}>
                                   <input type="color" value={layer.filamentColorHex} onChange={(e) => onLayerColorChange(layer.id, e.target.value)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" title="Change filament color" />
                                 </div>
-                                <span className="text-sm font-medium text-gray-200">{layer.name}</span>
+                                <input
+                                  type="text"
+                                  value={layer.name}
+                                  onChange={(e) => onLayerNameChange(layer.id, e.target.value)}
+                                  title="Click to rename"
+                                  className="min-w-0 flex-1 text-sm font-medium text-gray-200 bg-transparent border border-transparent rounded px-1 -mx-1 truncate hover:border-gray-600 focus:border-blue-500 focus:bg-gray-800 focus:outline-none"
+                                />
                               </div>
                               <div className="flex items-center gap-1">
                                 {layer.mergedFrom && layer.mergedFrom.length > 0 && (
@@ -232,6 +292,19 @@ export function Sidebar({
                 )}
               </Droppable>
             </DragDropContext>
+            <button
+              onClick={onToggleDiffuserLayer}
+              disabled={!hasDiffuser && !hasProcessedImage}
+              title={
+                hasDiffuser
+                  ? 'Remove the clear diffuser base layer'
+                  : 'Add a full-canvas clear/natural filament layer at the very bottom of the stack, to diffuse the backlight evenly before it reaches the color layers above'
+              }
+              className="w-full mt-2 flex items-center justify-center gap-2 text-sm bg-gray-600 text-white font-semibold py-2 px-3 rounded hover:bg-gray-500 disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed"
+            >
+              {hasDiffuser ? <X size={14} /> : <Plus size={14} />}
+              <span>{hasDiffuser ? 'Remove Diffuser Base Layer' : 'Add Diffuser Base Layer'}</span>
+            </button>
           </Section>
 
           <Section title="Global Settings" isOpen={openSections.global} onToggle={() => toggleSection('global')}>
@@ -257,9 +330,24 @@ export function Sidebar({
                   type="number"
                   min="0"
                   step="0.01"
-                  placeholder="optional"
+                  placeholder="none"
                   value={printerLayerHeightMm ?? ''}
                   onChange={(e) => onPrinterLayerHeightChange(e.target.value === '' ? null : parseFloat(e.target.value))}
+                  className="w-20 bg-gray-900 text-white text-sm rounded border border-gray-600 px-2 py-1 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                />
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <label htmlFor="first-layer-height" className="text-gray-300" title="If your first physical layer is printed taller for bed adhesion (e.g. 0.24mm first layer, 0.2mm rest), set it here so swap-point calculations account for the offset. Leave blank to assume it's the same as Printer Layer Height.">
+                  First Layer Height (mm)
+                </label>
+                <input
+                  id="first-layer-height"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="none"
+                  value={firstLayerHeightMm ?? ''}
+                  onChange={(e) => onFirstLayerHeightChange(e.target.value === '' ? null : parseFloat(e.target.value))}
                   className="w-20 bg-gray-900 text-white text-sm rounded border border-gray-600 px-2 py-1 focus:ring-2 focus:ring-blue-500 focus:outline-none"
                 />
               </div>
@@ -295,15 +383,34 @@ export function Sidebar({
                 <span>{swapPoints.length}</span>
               </div>
               {swapPoints.length > 0 && (
-                <ul className="space-y-1 max-h-32 overflow-y-auto text-xs text-gray-400 border-t border-gray-600 pt-2">
+                <ul className="space-y-1.5 max-h-40 overflow-y-auto text-xs border-t border-gray-600 pt-2">
                   {swapPoints.map((point, i) => (
-                    <li key={i} className="flex items-center justify-between gap-2" title={`Between "${point.afterName}" and "${point.beforeName}"`}>
-                      <span>z = {point.z.toFixed(2)} mm</span>
-                      {point.alignedToLayerHeight === false && (
-                        <span className="flex items-center gap-1 text-amber-400" title="Doesn't land on a printer layer boundary - adjust layer heights or the printer layer height above">
-                          <AlertTriangle size={12} /> off-grid
+                    <li key={i} className="space-y-0.5">
+                      <div className="flex items-center justify-between gap-2 text-gray-300">
+                        <span className="truncate" title={`${point.afterName} → ${point.beforeName}`}>
+                          {point.afterName} → {point.beforeName}
                         </span>
-                      )}
+                        {point.alignedToLayerHeight === false && (
+                          <span className="flex items-center gap-1 text-amber-400 flex-shrink-0" title="Doesn't land on a printer layer boundary - adjust layer heights or the printer layer height above">
+                            <AlertTriangle size={12} /> off-grid
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-gray-500">
+                        z = {point.z.toFixed(2)} mm
+                        {point.printLayerNumber !== null && (
+                          <>
+                            {' · '}
+                            {point.alignedToLayerHeight
+                              // Slicers that let you insert a pause "at layer N" trigger it
+                              // BEFORE layer N prints - so this is completed-layers + 1, the
+                              // number to actually type in, not the completed-layer count
+                              // (which would be off by one if entered directly).
+                              ? `at print layer ${Math.round(point.printLayerNumber) + 1}`
+                              : `mid print layer ${Math.ceil(point.printLayerNumber)}`}
+                          </>
+                        )}
+                      </div>
                     </li>
                   ))}
                 </ul>
