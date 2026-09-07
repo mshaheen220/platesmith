@@ -54,6 +54,57 @@ def relative_luminance(color) -> float:
     return 0.299 * r + 0.587 * g + 0.114 * b
 
 
+def compute_flat_pixel_mask(rgb_image: np.ndarray, variance_threshold: float = 4.0) -> np.ndarray:
+    """
+    True for pixels in a locally near-uniform color neighborhood, False right at a
+    color transition. Anti-aliased line art has a 1-2px soft color blend at every
+    edge; fitting K-Means on every pixel lets a common-enough blend tone become its
+    own cluster - a thin, spurious extra "layer" tracing every edge in the artwork,
+    whose ragged boundary doesn't accumulate/tile cleanly against the real layers.
+    Fitting on flat pixels only keeps cluster centers representing the artwork's
+    true colors; predicting on the full image afterward still classifies every
+    pixel, it just forces blend pixels to snap to whichever real color they're
+    actually closest to, instead of inventing a new one for the blend itself.
+    """
+    gray = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    local_mean = cv2.blur(gray, (3, 3))
+    local_sqmean = cv2.blur(gray * gray, (3, 3))
+    local_variance = local_sqmean - local_mean * local_mean
+    return local_variance < variance_threshold
+
+
+def merge_similar_clusters(palette: np.ndarray, distance_threshold: float = 30.0) -> List[int]:
+    """
+    Union-find merge of K-Means cluster centers that are close together in RGB
+    space. Asked for more clusters than an image truly has distinct colors,
+    K-Means will otherwise split one solid region into several near-identical
+    sub-clusters (e.g. four different near-blacks) - their mutual boundary is
+    noise, not a real color edge, and doesn't accumulate/tile cleanly against the
+    rest of the design. Returns, for each original cluster index, the
+    representative index of the group it was merged into.
+    """
+    n = len(palette)
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if np.linalg.norm(palette[i].astype(float) - palette[j].astype(float)) < distance_threshold:
+                union(i, j)
+
+    return [find(i) for i in range(n)]
+
+
 def parse_hex_color(value: str) -> Tuple[int, int, int]:
     """Parses a "#rrggbb" (or "rrggbb") string into an (r, g, b) int tuple."""
     cleaned = value.strip().lstrip("#")
@@ -169,6 +220,19 @@ def rasterize_evenodd(
         int_points = np.array(points, dtype=np.int32).reshape(-1, 1, 2)
         cv2.fillPoly(subpath_mask, [int_points], 255)
         mask = cv2.bitwise_xor(mask, subpath_mask)
+
+    # These subpaths always come from contour points traced by cv2.findContours
+    # (via create_svg_path_from_mask), and re-filling those exact points with
+    # fillPoly reproduces a region ~1px smaller than the mask they were traced
+    # from - fillPoly's scan-conversion doesn't include every boundary pixel a
+    # contour trace walked along. Two independently-traced, adjacent color layers
+    # each erode their shared boundary this way, leaving a real gap of uncovered
+    # pixels between them wide enough to see whatever's stacked behind show
+    # through. Dilating by the same 1px this step systematically loses closes
+    # that gap back up (verified: eliminates it with zero spill outside the
+    # original region) at the cost of shrinking any hole in the shape by ~1px -
+    # erring toward too much material rather than a visible seam.
+    mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
     return mask
 
 
@@ -582,37 +646,53 @@ async def process_image(
     alpha_channel = rgba_image[:, :, 3]
 
     # We only want to cluster opaque pixels
-    opaque_pixels = rgb_image[alpha_channel > 128]
+    opaque_mask = alpha_channel > 128
+    opaque_pixels = rgb_image[opaque_mask]
     if len(opaque_pixels) < num_colors:
         num_colors = len(opaque_pixels)
-    
+
     if num_colors == 0:
         return ProcessImageResponse(filename=file.filename, layers=[])
 
-    # Use K-Means to find the dominant colors
+    # Fit K-Means on "flat" (locally near-uniform) pixels only, not every opaque
+    # pixel - see compute_flat_pixel_mask for why. Fall back to every opaque pixel
+    # if there aren't even enough flat ones to fit the requested cluster count.
+    flat_mask = compute_flat_pixel_mask(rgb_image) & opaque_mask
+    fit_pixels = rgb_image[flat_mask] if int(flat_mask.sum()) >= num_colors else opaque_pixels
+
     kmeans = KMeans(n_clusters=num_colors, random_state=42, n_init=10)
-    kmeans.fit(opaque_pixels)
+    kmeans.fit(fit_pixels)
 
     # Get the palette (cluster centers) and labels
     palette = kmeans.cluster_centers_.astype(int)
     labels = kmeans.predict(rgb_image.reshape(-1, 3))
-    
+
     # Reshape labels back to image dimensions
-    labeled_image = labels.reshape(rgb_image.shape[:2])
+    labeled_image = labels.reshape(rgb_image.shape[:2]).astype(np.uint8)
+
+    # Collapse cluster centers that are near-duplicates of each other - see
+    # merge_similar_clusters for why - before building per-color masks.
+    merge_map = merge_similar_clusters(palette)
+    labeled_image = np.array(merge_map, dtype=np.uint8)[labeled_image]
+
+    # Denoise the classification ONCE, on the label map as a whole, before splitting
+    # it into per-color masks - not per-mask afterward. A median filter here reassigns
+    # each pixel to the majority label in its neighborhood, so misclassified/noisy
+    # pixels get cleaned up while every pixel still ends up with exactly one label.
+    # Cleaning each color's mask independently (the previous approach) let adjacent
+    # masks erode their shared boundary from both sides differently, leaving thin
+    # strips of pixels belonging to NEITHER mask - a real gap at every color boundary
+    # that nothing was drawn into, letting whatever sits behind the stack show through.
+    labeled_image = cv2.medianBlur(labeled_image, 5)
 
     layers_with_luminance: List[Tuple[float, LayerData]] = []
 
-    # Create a layer for each color in the palette
-    for i, color in enumerate(palette):
-        # Create a binary mask for the current cluster
-        # Also ensure we respect the original transparency
+    # Create a layer for each surviving (post-merge) cluster group. The color is the
+    # true average of the pixels actually assigned to it, not an arbitrary
+    # sub-cluster's center, since a merged group can combine several of those.
+    for group_id in sorted(set(merge_map)):
         mask = np.zeros(rgb_image.shape[:2], dtype=np.uint8)
-        mask[(labeled_image == i) & (alpha_channel > 128)] = 255
-
-        # Clean up the mask
-        mask = cv2.medianBlur(mask, 3)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3,3), np.uint8), iterations=1)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), iterations=1)
+        mask[(labeled_image == group_id) & opaque_mask] = 255
 
         if cv2.countNonZero(mask) < 20: # Ignore tiny, insignificant layers
             continue
@@ -621,9 +701,10 @@ async def process_image(
         svg_path = create_svg_path_from_mask(mask, width=image.width, height=image.height)
 
         if svg_path:
-            hex_color = f"#{color[0]:02x}{color[1]:02x}{color[2]:02x}"
+            mean_color = rgb_image[mask > 0].mean(axis=0)
+            hex_color = f"#{int(mean_color[0]):02x}{int(mean_color[1]):02x}{int(mean_color[2]):02x}"
             layers_with_luminance.append(
-                (relative_luminance(color), LayerData(color=hex_color, svg_path=svg_path))
+                (relative_luminance(mean_color), LayerData(color=hex_color, svg_path=svg_path))
             )
 
     if background_color:

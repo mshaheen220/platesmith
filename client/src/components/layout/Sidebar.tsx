@@ -124,8 +124,14 @@ export function Sidebar({
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (event.target.files && event.target.files[0]) {
-      setSelectedFile(event.target.files[0]);
-      setImagePreviewUrl(URL.createObjectURL(event.target.files[0]));
+      const file = event.target.files[0];
+      if (file.type !== 'image/png') {
+        alert('Only PNG images are supported right now.');
+        event.target.value = '';
+        return;
+      }
+      setSelectedFile(file);
+      setImagePreviewUrl(URL.createObjectURL(file));
     }
   };
 
@@ -178,7 +184,7 @@ export function Sidebar({
         <div className="space-y-8">
           <Section title="Image Source" isOpen={openSections.image} onToggle={() => toggleSection('image')}>
             <div className="bg-gray-700/50 rounded p-4 space-y-3">
-              <input type="file" onChange={handleFileChange} accept="image/png, image/svg+xml" className="text-sm text-gray-300 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
+              <input type="file" onChange={handleFileChange} accept="image/png" className="text-sm text-gray-300 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
               {imagePreviewUrl && (
                 <div className="flex justify-center p-2 bg-black/20 rounded">
                   <img src={imagePreviewUrl} alt="Selected preview" className="max-h-32 rounded" />
