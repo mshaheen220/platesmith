@@ -1,5 +1,6 @@
 import { useState, useRef } from 'react';
 import { Sidebar } from './components/layout/Sidebar';
+import { TipsPanel } from './components/layout/TipsPanel';
 import { ThreeCanvas } from './components/viewer/ThreeCanvas';
 import { ViewControls } from './components/viewer/ViewControls';
 import { Sun, Moon, Circle, Lightbulb } from 'lucide-react';
@@ -424,8 +425,8 @@ function App() {
   return (
     <div className="bg-gray-900 text-white h-screen flex flex-col font-sans">
       <header className="bg-gray-800 border-b border-gray-700 px-6 py-3 flex items-center gap-3">
-        <img src="/favicon/favicon.svg" alt="platesmith logo" className="h-6 w-6" />
-        <h1 className="text-xl font-bold tracking-tight flex items-baseline gap-2">
+        <img src="/favicon/favicon.svg" alt="platesmith logo" className="h-6 w-6 shrink-0" />
+        <h1 className="text-xl font-bold tracking-tight flex items-baseline gap-2 shrink-0">
           platesmith
           <span className="text-xs font-normal text-gray-500">v{appVersion}</span>
           {/* Optional: Add a small indicator for the current background mode */}
@@ -437,6 +438,9 @@ function App() {
               <Sun className="ml-2 inline-block h-4 w-4 text-yellow-400" /> :
               <Circle className="ml-2 inline-block h-4 w-4 text-gray-400" />}
         </h1>
+        <div className="flex min-w-0 flex-1 justify-end">
+          <TipsPanel />
+        </div>
       </header>
       {/* This container is the key to the layout. `flex-1` makes it fill vertical space.
           `overflow-hidden` is added to ensure its children are strictly contained. */}
