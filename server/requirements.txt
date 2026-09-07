@@ -1,6 +1,8 @@
 fastapi
 uvicorn[standard]
 trimesh
+shapely
+mapbox-earcut
 pillow
 numpy
 python-multipart

@@ -5,9 +5,10 @@ import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Maximize } from 'lucide-reac
 
 interface ViewControlsProps {
   controlsRef: React.RefObject<OrbitControlsImpl | null>;
+  fitToContentRef: React.RefObject<(() => void) | null>;
 }
 
-export function ViewControls({ controlsRef }: ViewControlsProps) {
+export function ViewControls({ controlsRef, fitToContentRef }: ViewControlsProps) {
   const PAN_SPEED = 0.5; // A smaller value for smoother panning
 
   const handlePan = (dx: number, dy: number) => {
@@ -25,7 +26,12 @@ export function ViewControls({ controlsRef }: ViewControlsProps) {
   };
 
   const handleZoomToFit = () => {
-    if (controlsRef.current) {
+    // Prefer a real re-fit to the content's current bounding box - OrbitControls.reset()
+    // only snaps back to whatever camera pose existed when it first mounted, which goes
+    // stale the moment the model's real-world scale (plate width, layer heights) changes.
+    if (fitToContentRef.current) {
+      fitToContentRef.current();
+    } else if (controlsRef.current) {
       controlsRef.current.reset();
     }
   };

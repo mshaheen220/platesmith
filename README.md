@@ -1,15 +1,23 @@
 # platesmith
 
-> Web-based multi-layer 3D plate generator for lightboxes, ornaments, and stacked filament prints.
+> Web-based multi-layer 3D plate generator for lightboxes and stacked filament prints.
 
 ## Overview
-platesmith converts 2D images (PNG/SVG) into stacked, multi-color 3D printable layers (STL/3MF). Designed for multi-material setups and manual filament-swap printing.
+platesmith converts a 2D image (PNG) into a stack of solid, single-color 3D printable layers, exported as STL files. It's built for multi-material/multi-color FDM printing where each color is printed as its own full layer and the filament is swapped by hand between layers (no AMS/MMU required) - you pause the print at a known Z height, swap filament, and resume.
 
 ## Features (Phase 1 - Lightbox Mode)
-- **Image Slicing & Layer Separation**: Auto-extract or manual color/luminance thresholding into discrete plates.
-- **Granular Controls**: Custom per-layer height (mm), Z-offset, and filament color matching.
-- **Interactive 3D Canvas**: React Three Fiber live preview with exploded Z-view and dynamic backlit simulation.
-- **Multi-Format Export**: Zip archive containing individual layer STLs with predictable naming.
+- **Image Slicing & Layer Separation**: K-means color clustering + contour tracing extracts each dominant color in the source image into its own layer, correctly preserving holes (e.g. a letter's counter, a ring).
+- **Support-Aware Layer Accumulation**: every layer's actual printable footprint is the union of its own shape with everything stacked above it, computed server-side and shared by both the live preview and the STL export so they can never disagree. This is a physical requirement, not a preview nicety - FDM material below a raised feature must be present regardless of that feature's color, or the feature above it has nothing to print on. A pure cutout only survives if it's a hole through every layer above it too; anything else gets backfilled automatically.
+- **Granular Controls**: per-layer height (mm), drag-to-reorder stacking, filament color override, merge-selected-layers, and per-layer visibility (hidden layers are fully excluded from the stack - the layers above close the gap rather than floating over empty space).
+- **Interactive 3D Canvas**: React Three Fiber live preview with exploded Z-view and a backlight simulation mode, rendering each layer's actual accumulated (support-aware) geometry.
+- **STL Export & Filament-Swap Manifest**: exports a zip containing one watertight STL per layer (scaled to a real-world plate width you set), plus a `manifest.json` and `README.txt` listing the exact Z height between every pair of layers where a filament swap must happen. If you set your printer's slicer layer height, each swap point is flagged as landing on an achievable physical layer boundary or not.
+
+## How It Works
+1. **Upload** a PNG. The backend clusters its opaque pixels into a handful of dominant colors (K-means) and traces each color's mask into an SVG path per layer (`POST /process-image/`).
+2. **Arrange** the layers in the sidebar: reorder by drag, adjust each layer's height, override its filament color, merge layers together, or hide ones you don't want printed.
+3. Any change to stacking order or inclusion triggers a call to `POST /accumulate-layers/`, which recomputes every layer's support-aware footprint and updates the 3D preview to show exactly what will print.
+4. **Export**: set the plate's real-world width and (optionally) your printer's slicer layer height, then export. `POST /export/` re-derives the same accumulated geometry, extrudes each layer into a proper watertight mesh via trimesh/shapely, and returns a zip of per-layer STLs plus the filament-swap manifest.
+5. **Print**: import the STLs into your slicer as one combined plate (or slice each layer's STL as its own object stacked at its printed height), then use the manifest's Z heights to insert a pause / color-change at each swap point - most slicers (PrusaSlicer, OrcaSlicer) support adding this directly at an exact height. platesmith does not generate or post-process g-code itself.
 
 ## Best Image Inputs for Processing
 
@@ -38,9 +46,25 @@ The current backend is a contour-based mask extractor, so it works best with cle
 - heavily blurred or compressed art
 - images with complex shadows or anti-aliased blends into the background
 
+## API
+
+The FastAPI backend exposes three endpoints, all consumed by the frontend:
+
+- `POST /process-image/` - accepts an uploaded image (`file`) and an optional `num_colors`; returns each extracted layer's dominant color and SVG path.
+- `POST /accumulate-layers/` - accepts layers (`id`, `svg_path`) ordered bottom-to-top; returns each layer's SVG path recomputed as the union with everything stacked above it. Used to keep the live preview support-aware.
+- `POST /export/` - accepts layers (`id`, `name`, `svg_path`, `layer_height_mm`, `z_offset_mm`, `color_hex`), a `plate_width_mm`, and an optional `printer_layer_height_mm`; returns a zip of per-layer STLs plus a filament-swap manifest.
+
+## Known Limitations / Not Yet Implemented
+
+This is a partial project. Notably missing or simplified:
+- Only the Lightbox flow exists end-to-end; there is no ornament or other project type yet.
+- No 3MF export, and no direct g-code generation or post-processing - the manifest tells you *where* to pause, but you insert the pause in your slicer yourself.
+- Final layer geometry resolution is tied to the resolution the source image is processed at, not an independent high-resolution vector re-trace.
+- No manual mask editing (paint/erase) - layer shapes come entirely from the automatic color clustering.
+
 ## Tech Stack
-- **Frontend**: React (Vite, TypeScript), Tailwind CSS, React Three Fiber / Three.js
-- **Backend**: Node.js / Python (2D vector/raster extrusion engine)
+- **Frontend**: React (Vite, TypeScript), Tailwind CSS, React Three Fiber / Three.js, `@hello-pangea/dnd`
+- **Backend**: Python (FastAPI) - OpenCV + scikit-learn for image clustering/contouring, Shapely for polygon/hole geometry, trimesh (+ mapbox-earcut for triangulation) for STL mesh generation
 
 ## Development Setup
 
