@@ -13,10 +13,10 @@ platesmith converts a 2D image (PNG) into a stack of solid, single-color 3D prin
 - **STL Export & Filament-Swap Manifest**: exports a zip containing one watertight STL per layer (scaled to a real-world plate width you set), plus a `manifest.json` and `README.txt` listing the exact Z height between every pair of layers where a filament swap must happen. If you set your printer's slicer layer height, each swap point is flagged as landing on an achievable physical layer boundary or not.
 
 ## How It Works
-1. **Upload** a PNG. The backend clusters its opaque pixels into a handful of dominant colors (K-means) and traces each color's mask into an SVG path per layer (`POST /process-image/`).
+1. **Upload** a PNG. The backend clusters its opaque pixels into a handful of dominant colors (K-means) and traces each color's mask into an SVG path per layer (`POST /api/process-image/`).
 2. **Arrange** the layers in the sidebar: reorder by drag, adjust each layer's height, override its filament color, merge layers together, or hide ones you don't want printed.
-3. Any change to stacking order or inclusion triggers a call to `POST /accumulate-layers/`, which recomputes every layer's support-aware footprint and updates the 3D preview to show exactly what will print.
-4. **Export**: set the plate's real-world width and (optionally) your printer's slicer layer height, then export. `POST /export/` re-derives the same accumulated geometry, extrudes each layer into a proper watertight mesh via trimesh/shapely, and returns a zip of per-layer STLs plus the filament-swap manifest.
+3. Any change to stacking order or inclusion triggers a call to `POST /api/accumulate-layers/`, which recomputes every layer's support-aware footprint and updates the 3D preview to show exactly what will print.
+4. **Export**: set the plate's real-world width and (optionally) your printer's slicer layer height, then export. `POST /api/export/` re-derives the same accumulated geometry, extrudes each layer into a proper watertight mesh via trimesh/shapely, and returns a zip of per-layer STLs plus the filament-swap manifest.
 5. **Print**: import the STLs into your slicer as one combined plate (or slice each layer's STL as its own object stacked at its printed height), then use the manifest's Z heights to insert a pause / color-change at each swap point - most slicers (PrusaSlicer, OrcaSlicer) support adding this directly at an exact height. platesmith does not generate or post-process g-code itself.
 
 ## Best Image Inputs for Processing
@@ -48,11 +48,12 @@ The current backend is a contour-based mask extractor, so it works best with cle
 
 ## API
 
-The FastAPI backend exposes three endpoints, all consumed by the frontend:
+The FastAPI backend exposes these endpoints under `/api`, all consumed by the frontend via relative paths (proxied to the backend by Vite in local dev, same-origin when running the built app in Docker):
 
-- `POST /process-image/` - accepts an uploaded image (`file`) and an optional `num_colors`; returns each extracted layer's dominant color and SVG path.
-- `POST /accumulate-layers/` - accepts layers (`id`, `svg_path`) ordered bottom-to-top; returns each layer's SVG path recomputed as the union with everything stacked above it. Used to keep the live preview support-aware.
-- `POST /export/` - accepts layers (`id`, `name`, `svg_path`, `layer_height_mm`, `z_offset_mm`, `color_hex`), a `plate_width_mm`, and an optional `printer_layer_height_mm`; returns a zip of per-layer STLs plus a filament-swap manifest.
+- `GET /api/health` - liveness check.
+- `POST /api/process-image/` - accepts an uploaded image (`file`), an optional `num_colors`, and an optional `background_color` (fills the image's transparent region as its own layer); returns each extracted layer's dominant color and SVG path.
+- `POST /api/accumulate-layers/` - accepts layers (`id`, `svg_path`) ordered bottom-to-top; returns each layer's SVG path recomputed as the union with everything stacked above it. Used to keep the live preview support-aware.
+- `POST /api/export/` - accepts layers (`id`, `name`, `svg_path`, `layer_height_mm`, `z_offset_mm`, `color_hex`), a `plate_width_mm`, and optional `printer_layer_height_mm`/`first_layer_height_mm`; returns a zip of per-layer STLs, an assembled reference STL, and a filament-swap manifest.
 
 ## Known Limitations / Not Yet Implemented
 
@@ -105,3 +106,15 @@ You will need two separate terminal windows to run the frontend and backend serv
     The backend API will be available at `http://localhost:8001`.
 
 *Note: You can also use the combined `npm run dev:all` script from the `/client` directory after installing `concurrently`.*
+
+## Docker
+
+For running platesmith as a single container instead of native dev - useful for keeping it alongside other locally-run tools:
+
+```bash
+docker compose up --build -d
+```
+
+This builds the Vite frontend to static assets and serves them from the same FastAPI process that serves `/api/*`, on one port - visit `http://localhost:8001`. Native dev (above) doesn't go through Docker and is unaffected.
+
+This `docker-compose.yml` is intentionally standalone for now. The plan is to eventually fold this service into a separate dashboard project's compose file (alongside other local 3D-printing tools) so they all share one network and are reachable from that dashboard by service name - no explicit network is declared here for that reason.

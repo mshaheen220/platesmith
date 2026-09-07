@@ -1,6 +1,8 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from pydantic import BaseModel
 import io
@@ -274,7 +276,7 @@ class AccumulateResponse(BaseModel):
     layers: List[AccumulatedLayer]
 
 
-@app.post("/accumulate-layers/", response_model=AccumulateResponse)
+@app.post("/api/accumulate-layers/", response_model=AccumulateResponse)
 def accumulate_layers(request: AccumulateRequest) -> AccumulateResponse:
     """
     Computes each layer's printable footprint as the union of its own shape with
@@ -400,7 +402,7 @@ def _build_export_readme(manifest: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-@app.post("/export/")
+@app.post("/api/export/")
 def export_plate(request: ExportRequest) -> StreamingResponse:
     """
     Builds one STL per layer - each extruded from that layer's accumulated
@@ -544,12 +546,12 @@ def export_plate(request: ExportRequest) -> StreamingResponse:
     )
 
 
-@app.get("/")
+@app.get("/api/health")
 def read_root() -> Dict[str, str]:
     """A simple endpoint to confirm the server is running."""
     return {"message": "platesmith backend is running!"}
 
-@app.post("/process-image/", response_model=ProcessImageResponse)
+@app.post("/api/process-image/", response_model=ProcessImageResponse)
 async def process_image(
     file: UploadFile = File(...),
     num_colors: int = Form(8),
@@ -648,3 +650,15 @@ async def process_image(
     response_layers = [layer for _, layer in layers_with_luminance]
 
     return ProcessImageResponse(filename=file.filename, layers=response_layers)
+
+
+# Serves the built frontend (Docker: the multi-stage build copies client/dist here)
+# so the whole app - UI and API - runs as a single process on one port, matching
+# how the other local 3D-printing tools are containerized. Mounted last, and only
+# if actually present, so it's a no-op in local dev (Vite's own dev server serves
+# the frontend there instead, proxying /api/* to this backend - see vite.config.ts).
+# Being registered after every /api/* route means those still take priority; this
+# StaticFiles(html=True) mount only catches whatever they don't.
+_frontend_dist = Path(__file__).resolve().parent / "static"
+if _frontend_dist.is_dir():
+    app.mount("/", StaticFiles(directory=_frontend_dist, html=True), name="frontend")

@@ -1,0 +1,20 @@
+# Keep the build context small and avoid copying host-specific/stale artifacts
+# (especially node_modules and .venv - copying either in would shadow the
+# clean install the Dockerfile does, exactly like the stale vite.config.js
+# incident this project already hit once).
+**/node_modules
+**/.venv
+**/dist
+**/__pycache__
+**/*.pyc
+.git
+.vscode
+.idea
+*.log
+tmp/
+temp_exports/
+output/
+*.stl
+*.3mf
+*.zip
+.DS_Store

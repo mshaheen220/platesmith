@@ -1,0 +1,25 @@
+# Single command to run the whole app:
+#
+#   docker compose up --build -d
+#
+# The UI and API are both served by the one "app" service, on :8001 - visit
+# http://localhost:8001. Native development (npm run dev:all) is unaffected
+# and doesn't go through Docker at all.
+#
+# This is intentionally its own standalone compose file for now. The eventual
+# plan is to fold this service into the 3d-printing-workshop dashboard's
+# docker-compose.yml (which will run Spoolman, Chocolate Mold Factory, and
+# this) so all three sit on that project's one shared default network and are
+# reachable from the dashboard by service name. No explicit network is
+# declared here for that reason - Compose's per-project default network is
+# enough while this runs alone, and once merged into a single compose file
+# every service in it shares one default network automatically, no explicit
+# network block required.
+services:
+  app:
+    build:
+      context: .
+    image: platesmith:latest
+    ports:
+      - "8001:8001"
+    restart: unless-stopped

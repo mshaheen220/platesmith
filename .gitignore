@@ -13,6 +13,10 @@ yarn-error.log*
 .pnpm-store/
 report.html
 .vite/
+# Stale compiled output of vite.config.ts has shadowed the real source before
+# (Vite's config auto-discovery tries .js before .ts) - never let it happen again.
+client/vite.config.js
+client/vite.config.d.ts
 
 # Python / Backend (FastAPI)
 __pycache__/

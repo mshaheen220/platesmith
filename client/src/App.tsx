@@ -93,8 +93,7 @@ function App() {
     if (visibleLayers.length === 0) return;
 
     try {
-      const apiBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8001';
-      const response = await fetch(`${apiBaseUrl}/accumulate-layers/`, {
+      const response = await fetch('/api/accumulate-layers/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -286,8 +285,7 @@ function App() {
 
     setIsExporting(true);
     try {
-      const apiBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8001';
-      const response = await fetch(`${apiBaseUrl}/export/`, {
+      const response = await fetch('/api/export/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -368,8 +366,7 @@ function App() {
     }
 
     try {
-      const apiBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8001';
-      const response = await fetch(`${apiBaseUrl}/process-image/`, {
+      const response = await fetch('/api/process-image/', {
         method: 'POST',
         body: formData,
       });
