@@ -51,6 +51,7 @@ The current backend is a contour-based mask extractor, so it works best with cle
 The FastAPI backend exposes these endpoints under `/api`, all consumed by the frontend via relative paths (proxied to the backend by Vite in local dev, same-origin when running the built app in Docker):
 
 - `GET /api/health` - liveness check.
+- `GET /api/tips/` - returns every tip shown in the app's own tips panel (`{"tips": [{"category", "text"}, ...]}`) - not consumed by the frontend itself (which has its own local copy), exposed for other apps to use as they see fit. Keep in sync with `client/src/tips.ts` when editing either.
 - `POST /api/process-image/` - accepts an uploaded image (`file`), an optional `num_colors`, and an optional `background_color` (fills the image's transparent region as its own layer); returns each extracted layer's dominant color and SVG path.
 - `POST /api/accumulate-layers/` - accepts layers (`id`, `svg_path`) ordered bottom-to-top; returns each layer's SVG path recomputed as the union with everything stacked above it. Used to keep the live preview support-aware.
 - `POST /api/export/` - accepts layers (`id`, `name`, `svg_path`, `layer_height_mm`, `z_offset_mm`, `color_hex`), a `plate_width_mm`, and optional `printer_layer_height_mm`/`first_layer_height_mm`; returns a zip of per-layer STLs, an assembled reference STL, and a filament-swap manifest.

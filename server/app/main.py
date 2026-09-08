@@ -610,6 +610,48 @@ def export_plate(request: ExportRequest) -> StreamingResponse:
     )
 
 
+class TipItem(BaseModel):
+    category: str
+    text: str
+
+
+class TipsResponse(BaseModel):
+    tips: List[TipItem]
+
+
+# Mirrors client/src/tips.ts (the frontend's own tips panel) so external apps can
+# consume the same content via the API - keep the two in sync when editing either.
+TIPS: List[TipItem] = [
+    # --- Layers ---
+    TipItem(category="layers", text="Check the box next to two or more layers to enable Merge Selected — handy when a color split isn't meaningful for your print."),
+    TipItem(category="layers", text="Merging layers is fully reversible: click the Unmerge icon on a merged layer to restore the original layers that went into it."),
+    TipItem(category="layers", text="Add a Diffuser Base Layer to spread backlight evenly under your color layers instead of leaving hot spots and shadows."),
+    TipItem(category="layers", text="Changing a layer's height instantly re-stacks every layer above it in the 3D preview — no need to re-upload or re-process."),
+    TipItem(category="layers", text="Uploading a PNG with a transparent background? Turn on Fill Transparent Background first to turn the cutout into a solid rectangular plate."),
+    TipItem(category="layers", text="Drag a layer's grip handle to reorder the stack — Platesmith recalculates filament swap points automatically after a reorder."),
+    TipItem(category="layers", text="Click a layer's name to rename it inline — worth doing once you have more than a couple of colors to keep track of."),
+    TipItem(category="layers", text="Hiding a layer removes it from the stack entirely and closes the height gap it would have left — it isn't just skipped at export time."),
+    # --- Printing & slicing ---
+    TipItem(category="printing", text="Set Printer Layer Height so Platesmith can flag filament swap points that don't land on an achievable physical layer boundary."),
+    TipItem(category="printing", text="If your first layer prints taller for bed adhesion, set First Layer Height separately — swap point math accounts for that one-time offset."),
+    TipItem(category="printing", text="Snap to Layer Grid rounds every layer's height to a multiple of your printer's layer height, so every color swap lands on a clean boundary."),
+    TipItem(category="printing", text="The 'print layer' number shown for a swap point is what to type into your slicer's pause-at-layer feature — it's already offset by one."),
+    TipItem(category="printing", text="Export STL Pack exports every visible layer at its current height, order, and color as separate, ready-to-slice files."),
+    TipItem(category="printing", text="Plate Width sets the real-world export scale — your source image's pixel width maps to this dimension in millimeters."),
+    # --- Backlight & viewing ---
+    TipItem(category="backlight", text="Toggle Backlight Simulation to preview how light passes through thin filament areas before committing to a layer height."),
+    TipItem(category="backlight", text="Exploded View pulls layers apart along Z so you can inspect stacking order and gaps that overlap in the normal stacked view."),
+    TipItem(category="backlight", text="Cycle Canvas Background between dark, light, and neutral gray to check contrast against different lightbox or display setups."),
+    TipItem(category="backlight", text="A thin, light-colored Diffuser Base under a lightbox print softens hard edges between colors when the backlight is on."),
+]
+
+
+@app.get("/api/tips/", response_model=TipsResponse)
+def get_all_tips() -> TipsResponse:
+    """Returns every tip Platesmith shows in its own UI, for other apps to consume as they see fit."""
+    return TipsResponse(tips=TIPS)
+
+
 @app.get("/api/health")
 def read_root() -> Dict[str, str]:
     """A simple endpoint to confirm the server is running."""
